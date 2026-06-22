@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Architecture AI — Virtual Builder</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: #0a0e1a;
+    color: #e0e6f0;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 18px 32px;
+    background: rgba(255,255,255,0.03);
+    border-bottom: 1px solid rgba(255,255,255,0.07);
+    backdrop-filter: blur(10px);
+    position: sticky; top: 0; z-index: 100;
+  }
+  header .logo { font-size: 22px; }
+  header h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.02em; }
+  header span { font-size: 12px; color: #5a7aaa; background: rgba(90,122,170,0.15);
+    padding: 2px 8px; border-radius: 20px; border: 1px solid rgba(90,122,170,0.3); }
+
+  /* ── Upload zone ── */
+  #upload-zone {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-height: calc(100vh - 62px);
+    padding: 40px 20px;
+  }
+  .upload-card {
+    background: rgba(255,255,255,0.03);
+    border: 2px dashed rgba(100,140,200,0.3);
+    border-radius: 20px;
+    padding: 60px 80px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.3s;
+    max-width: 560px; width: 100%;
+  }
+  .upload-card:hover, .upload-card.drag-over {
+    border-color: rgba(100,180,255,0.6);
+    background: rgba(100,180,255,0.05);
+    transform: translateY(-2px);
+  }
+  .upload-card .icon { font-size: 56px; margin-bottom: 20px; }
+  .upload-card h2 { font-size: 22px; margin-bottom: 10px; font-weight: 600; }
+  .upload-card p { color: #6a8ab0; font-size: 14px; line-height: 1.6; }
+  .upload-card .formats { margin-top: 16px; font-size: 12px; color: #445570; }
+  #file-input { display: none; }
+  .btn {
+    display: inline-block; margin-top: 24px;
+    background: linear-gradient(135deg, #2563eb, #1d4ed8);
+    color: white; padding: 12px 32px; border-radius: 10px;
+    font-size: 15px; font-weight: 600; cursor: pointer; border: none;
+    transition: all 0.2s; letter-spacing: 0.02em;
+  }
+  .btn:hover { transform: translateY(-1px); box-shadow: 0 8px 25px rgba(37,99,235,0.4); }
+
+  /* ── Loading ── */
+  #loading-zone {
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    min-height: calc(100vh - 62px); gap: 24px;
+  }
+  .loader {
+    width: 64px; height: 64px;
+    border: 3px solid rgba(255,255,255,0.08);
+    border-top-color: #3b82f6;
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading-text { font-size: 16px; color: #6a8ab0; }
+  .loading-steps { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+  .step {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 13px; color: #445570; transition: color 0.4s;
+  }
+  .step.active { color: #93c5fd; }
+  .step.done { color: #4ade80; }
+  .step-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: currentColor; flex-shrink: 0;
+  }
+
+  /* ── Results ── */
+  #results-zone { display: none; padding: 24px 32px 60px; }
+
+  .results-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 24px;
+  }
+  .results-header h2 { font-size: 20px; font-weight: 600; }
+  .new-btn {
+    background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.12);
+    color: #c0d0e8; padding: 8px 18px; border-radius: 8px;
+    font-size: 13px; cursor: pointer; transition: all 0.2s;
+  }
+  .new-btn:hover { background: rgba(255,255,255,0.12); }
+
+  .results-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto auto;
+    gap: 20px;
+  }
+
+  /* ── 3D Viewer ── */
+  .viewer-card {
+    grid-column: 1; grid-row: 1 / 3;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 16px; overflow: hidden;
+    position: relative;
+  }
+  .viewer-card .card-label {
+    position: absolute; top: 14px; left: 16px; z-index: 10;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
+    color: #4a6a9a; background: rgba(10,14,26,0.8);
+    padding: 4px 10px; border-radius: 6px; backdrop-filter: blur(8px);
+  }
+  .viewer-controls {
+    position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+    z-index: 10; display: flex; gap: 8px;
+    background: rgba(10,14,26,0.85); border-radius: 30px;
+    padding: 6px 14px; backdrop-filter: blur(8px);
+    border: 1px solid rgba(255,255,255,0.07);
+  }
+  .viewer-controls span { font-size: 11px; color: #445570; }
+  #three-canvas { display: block; width: 100%; height: 520px; }
+
+  /* ── Source image ── */
+  .image-card {
+    grid-column: 2; grid-row: 1;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 16px; overflow: hidden; position: relative;
+  }
+  .image-card .card-label {
+    position: absolute; top: 14px; left: 16px; z-index: 10;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
+    color: #4a6a9a; background: rgba(10,14,26,0.8);
+    padding: 4px 10px; border-radius: 6px;
+  }
+  #source-img {
+    width: 100%; height: 240px; object-fit: cover; display: block;
+  }
+
+  /* ── Spec badges ── */
+  .spec-card {
+    grid-column: 2; grid-row: 2;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 16px; padding: 20px;
+  }
+  .spec-card h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: #4a6a9a; margin-bottom: 14px; }
+  .spec-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .spec-item {
+    background: rgba(255,255,255,0.04); border-radius: 10px;
+    padding: 10px 14px;
+  }
+  .spec-item .label { font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.08em; color: #4a6a9a; margin-bottom: 4px; }
+  .spec-item .value { font-size: 15px; font-weight: 600; color: #c8d8f0; }
+
+  /* ── Report ── */
+  .report-card {
+    grid-column: 1 / 3;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 16px; padding: 28px 32px;
+  }
+  .report-card h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: #4a6a9a; margin-bottom: 20px; }
+  .report-sections { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+  .report-section {
+    background: rgba(255,255,255,0.03); border-radius: 12px;
+    padding: 16px 18px;
+    border-left: 3px solid #2563eb;
+    animation: fadeUp 0.5s ease both;
+  }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .report-section h4 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: #3b82f6; margin-bottom: 8px; }
+  .report-section p { font-size: 13px; line-height: 1.65; color: #8aa0c0; }
+  .verdict-section { border-left-color: #f59e0b; }
+  .verdict-section h4 { color: #f59e0b; }
+  .score {
+    display: inline-block; font-size: 28px; font-weight: 700;
+    color: #f59e0b; margin-bottom: 6px;
+  }
+
+  @media (max-width: 900px) {
+    .results-grid { grid-template-columns: 1fr; }
+    .viewer-card { grid-column: 1; grid-row: auto; }
+    .image-card { grid-column: 1; grid-row: auto; }
+    .spec-card { grid-column: 1; grid-row: auto; }
+    .report-card { grid-column: 1; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="logo">🏛</span>
+  <h1>Architecture AI</h1>
+  <span>Virtual Builder</span>
+</header>
+
+<!-- Upload -->
+<div id="upload-zone">
+  <div class="upload-card" id="drop-zone">
+    <div class="icon">🏗️</div>
+    <h2>Upload Architectural Image</h2>
+    <p>Drop a building photo, sketch, or floor plan.<br>AI will analyze it and generate an interactive 3D model.</p>
+    <p class="formats">JPG · PNG · WEBP — up to 20MB</p>
+    <label class="btn" for="file-input">Choose Image</label>
+    <input type="file" id="file-input" accept="image/*">
+  </div>
+</div>
+
+<!-- Loading -->
+<div id="loading-zone">
+  <div class="loader"></div>
+  <div class="loading-text">Analyzing architecture...</div>
+  <div class="loading-steps">
+    <div class="step" id="step-1"><div class="step-dot"></div>Processing image</div>
+    <div class="step" id="step-2"><div class="step-dot"></div>AI structural analysis</div>
+    <div class="step" id="step-3"><div class="step-dot"></div>Extracting 3D specs</div>
+    <div class="step" id="step-4"><div class="step-dot"></div>Building 3D model</div>
+  </div>
+</div>
+
+<!-- Results -->
+<div id="results-zone">
+  <div class="results-header">
+    <h2 id="building-title">Virtual Architecture</h2>
+    <button class="new-btn" onclick="reset()">← New Analysis</button>
+  </div>
+  <div class="results-grid">
+
+    <!-- 3D Viewer -->
+    <div class="viewer-card">
+      <div class="card-label">3D MODEL — drag to rotate · scroll to zoom</div>
+      <canvas id="three-canvas"></canvas>
+      <div class="viewer-controls">
+        <span>🖱️ Drag to rotate</span>
+        <span>·</span>
+        <span>Scroll to zoom</span>
+        <span>·</span>
+        <span>Right-drag to pan</span>
+      </div>
+    </div>
+
+    <!-- Source Image -->
+    <div class="image-card">
+      <div class="card-label">SOURCE IMAGE</div>
+      <img id="source-img" src="" alt="Source">
+    </div>
+
+    <!-- Specs -->
+    <div class="spec-card">
+      <h3>Building Specifications</h3>
+      <div class="spec-grid" id="spec-grid"></div>
+    </div>
+
+    <!-- Report -->
+    <div class="report-card">
+      <h3>Architecture Report</h3>
+      <div class="report-sections" id="report-sections"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Three.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+<script>
+// ── Upload handling ────────────────────────────────────────────────────────
+
+const dropZone  = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+
+dropZone.addEventListener('dragover',  e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('drag-over');
+  if (e.dataTransfer.files[0]) uploadFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) uploadFile(fileInput.files[0]); });
+
+function show(id) {
+  ['upload-zone','loading-zone','results-zone'].forEach(z => {
+    document.getElementById(z).style.display = z === id ? (id === 'upload-zone' ? 'flex' : id === 'loading-zone' ? 'flex' : 'block') : 'none';
+  });
+}
+
+function reset() { show('upload-zone'); fileInput.value = ''; }
+
+// ── Step animation ─────────────────────────────────────────────────────────
+let stepTimer = null;
+function animateSteps() {
+  const steps = ['step-1','step-2','step-3','step-4'];
+  let i = 0;
+  steps.forEach(s => document.getElementById(s).className = 'step');
+  stepTimer = setInterval(() => {
+    if (i > 0) document.getElementById(steps[i-1]).className = 'step done';
+    if (i < steps.length) { document.getElementById(steps[i]).className = 'step active'; i++; }
+  }, 1200);
+}
+function stopSteps() { clearInterval(stepTimer); }
+
+// ── Upload & analyze ───────────────────────────────────────────────────────
+async function uploadFile(file) {
+  show('loading-zone');
+  animateSteps();
+
+  const form = new FormData();
+  form.append('image', file);
+
+  try {
+    const res  = await fetch('/analyze', { method: 'POST', body: form });
+    const data = await res.json();
+    stopSteps();
+    if (data.error) { alert('Error: ' + data.error); show('upload-zone'); return; }
+    renderResults(data);
+  } catch(e) {
+    stopSteps(); alert('Network error: ' + e.message); show('upload-zone');
+  }
+}
+
+// ── Render results ─────────────────────────────────────────────────────────
+function renderResults(data) {
+  const spec = data.spec;
+  document.getElementById('building-title').textContent = spec.style + ' Building';
+  document.getElementById('source-img').src = data.image;
+
+  // Spec grid
+  const sg = document.getElementById('spec-grid');
+  sg.innerHTML = '';
+  const items = [
+    ['Style', spec.style],
+    ['Floors', spec.floors],
+    ['Height', spec.height + 'm'],
+    ['Width', spec.width + 'm'],
+    ['Depth', spec.depth + 'm'],
+    ['Floor H.', spec.floor_height + 'm'],
+    ['Facade', spec.facade_material],
+    ['Roof', spec.roof],
+  ];
+  items.forEach(([label, value]) => {
+    sg.innerHTML += `<div class="spec-item"><div class="label">${label}</div><div class="value">${value}</div></div>`;
+  });
+
+  // Report sections
+  const rs = document.getElementById('report-sections');
+  rs.innerHTML = '';
+  const sections = parseReport(data.report);
+  sections.forEach(({title, body}, i) => {
+    const isVerdict = title.toLowerCase().includes('verdict');
+    const scoreMatch = body.match(/(\d+)\/10/);
+    let content = `<div class="report-section ${isVerdict ? 'verdict-section' : ''}" style="animation-delay:${i*0.07}s">
+      <h4>${title}</h4>`;
+    if (isVerdict && scoreMatch) {
+      content += `<div class="score">${scoreMatch[1]}<span style="font-size:14px;color:#888">/10</span></div>`;
+    }
+    content += `<p>${body.replace(/\n/g,'<br>')}</p></div>`;
+    rs.innerHTML += content;
+  });
+
+  show('results-zone');
+  build3DModel(spec);
+}
+
+function parseReport(text) {
+  const sections = [];
+  const parts = text.split(/^##\s+/m).filter(p => p.trim());
+  parts.forEach(part => {
+    const lines = part.split('\n');
+    const title = lines[0].trim();
+    const body  = lines.slice(1).join('\n').trim();
+    if (title && body) sections.push({ title, body });
+  });
+  return sections;
+}
+
+// ── Three.js 3D Building ───────────────────────────────────────────────────
+let renderer, scene, camera, controls, animFrame;
+
+function build3DModel(spec) {
+  const canvas = document.getElementById('three-canvas');
+  if (renderer) { renderer.dispose(); cancelAnimationFrame(animFrame); }
+
+  // Scene
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0a0e1a);
+  scene.fog = new THREE.FogExp2(0x0a0e1a, 0.012);
+
+  // Camera
+  const w = canvas.clientWidth, h = canvas.clientHeight || 520;
+  camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 2000);
+  const camDist = Math.max(spec.width, spec.height) * 1.6;
+  camera.position.set(camDist, camDist * 0.6, camDist);
+  camera.lookAt(0, spec.height / 2, 0);
+
+  // Renderer
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setSize(w, h);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+  // Controls
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.target.set(0, spec.height / 2, 0);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.07;
+  controls.minDistance = 10;
+  controls.maxDistance = 500;
+
+  // Lights
+  const ambient = new THREE.AmbientLight(0x334466, 0.8);
+  scene.add(ambient);
+  const sun = new THREE.DirectionalLight(0xfff5e0, 1.4);
+  sun.position.set(80, 120, 60);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.camera.near = 1;
+  sun.shadow.camera.far = 500;
+  sun.shadow.camera.left = sun.shadow.camera.bottom = -200;
+  sun.shadow.camera.right = sun.shadow.camera.top = 200;
+  scene.add(sun);
+  const fill = new THREE.DirectionalLight(0x4466aa, 0.5);
+  fill.position.set(-60, 40, -80);
+  scene.add(fill);
+
+  // Ground grid
+  const grid = new THREE.GridHelper(300, 30, 0x1a2a4a, 0x111827);
+  scene.add(grid);
+
+  // Ground plane
+  const groundGeo = new THREE.PlaneGeometry(300, 300);
+  const groundMat = new THREE.MeshLambertMaterial({ color: 0x0d1220 });
+  const ground = new THREE.Mesh(groundGeo, groundMat);
+  ground.rotation.x = -Math.PI / 2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  // Parse facade color
+  let facadeHex = 0x6fa8c8;
+  try { facadeHex = parseInt((spec.facade_color || '#6fa8c8').replace('#',''), 16); } catch(e) {}
+
+  // ── Build the building ───────────────────────────────────────────────────
+  const bW = spec.width;
+  const bD = spec.depth;
+  const bH = spec.height;
+  const floors = spec.floors;
+  const fH = spec.floor_height;
+  const hasPodium = spec.has_podium && spec.podium_floors > 0;
+  const podiumFloors = spec.podium_floors || 0;
+  const setbacks = spec.setbacks || 0;
+
+  // Materials
+  const facadeMat = new THREE.MeshPhongMaterial({
+    color: facadeHex,
+    transparent: spec.facade_material === 'glass',
+    opacity: spec.facade_material === 'glass' ? 0.82 : 1.0,
+    shininess: spec.facade_material === 'glass' ? 120 : 30,
+    specular: spec.facade_material === 'glass' ? 0xffffff : 0x222222,
+  });
+  const darkMat  = new THREE.MeshPhongMaterial({ color: 0x1a2030, shininess: 10 });
+  const concMat  = new THREE.MeshPhongMaterial({ color: 0x3a4050, shininess: 5 });
+  const windowMat = new THREE.MeshPhongMaterial({
+    color: 0x88bbdd, transparent: true, opacity: 0.6,
+    shininess: 200, specular: 0xffffff,
+    emissive: 0x112233, emissiveIntensity: 0.3,
+  });
+  const frameMat = new THREE.MeshPhongMaterial({ color: 0x222833, shininess: 40 });
+
+  const buildingGroup = new THREE.Group();
+
+  // Helper: add a box
+  function addBox(w, h, d, x, y, z, mat, shadow=true) {
+    const geo = new THREE.BoxGeometry(w, h, d);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(x, y, z);
+    if (shadow) { mesh.castShadow = true; mesh.receiveShadow = true; }
+    buildingGroup.add(mesh);
+    return mesh;
+  }
+
+  // Helper: add windows on a facade
+  function addWindows(facadeW, facadeH, facadeZ, facadeRotY, cols, rows, floorStart, floorCount) {
+    if (cols <= 0 || rows <= 0) return;
+    const wW = (facadeW / cols) * 0.5;
+    const wH = (fH) * 0.55;
+    const colStep = facadeW / cols;
+    const rowStep = facadeH / rows;
+    const wGeo = new THREE.BoxGeometry(wW, wH, 0.25);
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const wx = -facadeW / 2 + colStep * (c + 0.5);
+        const wy = floorStart * fH + rowStep * (r + 0.5) + wH * 0.1;
+        const wMesh = new THREE.Mesh(wGeo, windowMat);
+        wMesh.position.set(wx, wy, facadeZ);
+        wMesh.rotation.y = facadeRotY;
+        buildingGroup.add(wMesh);
+      }
+    }
+  }
+
+  // Podium
+  if (hasPodium) {
+    const pH = podiumFloors * fH;
+    addBox(bW * 1.3, pH, bD * 1.3, 0, pH / 2, 0, concMat);
+    addWindows(bW * 1.3, pH, bD * 0.65 + 0.1, 0, Math.ceil(spec.window_cols * 1.3), podiumFloors, 0, podiumFloors);
+  }
+
+  // Main tower body
+  const towerBase = hasPodium ? podiumFloors * fH : 0;
+  const towerH = bH - towerBase;
+
+  if (setbacks > 0) {
+    // Build with setbacks
+    const segFloors = Math.floor(floors / (setbacks + 1));
+    for (let s = 0; s <= setbacks; s++) {
+      const scale = 1 - s * 0.15;
+      const segH = (s === setbacks ? floors - segFloors * s : segFloors) * fH;
+      const segBase = towerBase + s * segFloors * fH;
+      addBox(bW * scale, segH, bD * scale, 0, segBase + segH / 2, 0, facadeMat);
+    }
+  } else {
+    addBox(bW, towerH, bD, 0, towerBase + towerH / 2, 0, facadeMat);
+  }
+
+  // Floor lines (horizontal bands)
+  for (let f = 1; f < floors; f++) {
+    const lineY = f * fH;
+    const lineGeo = new THREE.BoxGeometry(bW + 0.3, 0.18, bD + 0.3);
+    const lineMesh = new THREE.Mesh(lineGeo, frameMat);
+    lineMesh.position.y = towerBase + lineY;
+    buildingGroup.add(lineMesh);
+  }
+
+  // Windows — front & back
+  const wCols = Math.max(2, spec.window_cols);
+  const wRows = Math.max(1, Math.min(floors, spec.window_rows));
+  addWindows(bW, towerH, bD / 2 + 0.15, 0, wCols, wRows, towerBase / fH, floors);
+  addWindows(bW, towerH, -(bD / 2 + 0.15), Math.PI, wCols, wRows, towerBase / fH, floors);
+
+  // Windows — sides
+  const sideCols = Math.max(2, Math.round(wCols * (bD / bW)));
+  addWindows(bD, towerH, bW / 2 + 0.15, Math.PI / 2, sideCols, wRows, towerBase / fH, floors);
+  addWindows(bD, towerH, -(bW / 2 + 0.15), -Math.PI / 2, sideCols, wRows, towerBase / fH, floors);
+
+  // Entrance canopy
+  if (spec.has_entrance_canopy) {
+    addBox(bW * 0.4, 0.5, 4, 0, fH * 0.8, bD / 2 + 1.5, darkMat);
+    addBox(bW * 0.4, fH * 0.8, 0.3, 0, fH * 0.4, bD / 2, frameMat);
+  }
+
+  // Roof
+  if (spec.roof === 'pitched') {
+    const rGeo = new THREE.ConeGeometry(Math.max(bW, bD) * 0.6, bH * 0.15, 4);
+    const rMesh = new THREE.Mesh(rGeo, concMat);
+    rMesh.position.y = bH + bH * 0.075;
+    rMesh.rotation.y = Math.PI / 4;
+    rMesh.castShadow = true;
+    buildingGroup.add(rMesh);
+  } else if (spec.roof === 'dome') {
+    const rGeo = new THREE.SphereGeometry(Math.min(bW, bD) * 0.5, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2);
+    const rMesh = new THREE.Mesh(rGeo, facadeMat);
+    rMesh.position.y = bH;
+    buildingGroup.add(rMesh);
+  } else {
+    // Flat roof parapet
+    addBox(bW + 1, 1.2, bD + 1, 0, bH + 0.6, 0, darkMat);
+    // Rooftop equipment
+    addBox(bW * 0.3, 3, bD * 0.2, -bW * 0.2, bH + 2.5, 0, concMat);
+    addBox(2, 5, 2, bW * 0.2, bH + 3.5, bD * 0.1, darkMat);
+  }
+
+  scene.add(buildingGroup);
+
+  // Subtle point lights for atmosphere
+  const pl1 = new THREE.PointLight(0x4488ff, 0.6, 200);
+  pl1.position.set(-50, 80, 50);
+  scene.add(pl1);
+  const pl2 = new THREE.PointLight(0xffaa44, 0.3, 150);
+  pl2.position.set(50, 20, -50);
+  scene.add(pl2);
+
+  // ── Animate ──
+  function animate() {
+    animFrame = requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+  }
+  animate();
+
+  // Resize
+  window.addEventListener('resize', () => {
+    const w2 = canvas.clientWidth, h2 = canvas.clientHeight || 520;
+    camera.aspect = w2 / h2;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w2, h2);
+  });
+}
+</script>
+</body>
+</html>
