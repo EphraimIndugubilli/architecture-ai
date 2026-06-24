@@ -238,6 +238,74 @@ def analyze():
         return jsonify({"error": str(e)}), 500
 
 
+COMPARE_PROMPT = """
+You are an expert architect comparing two buildings side by side.
+
+For each building output a JSON block labeled ```json-a``` and ```json-b``` with the same fields as the standard spec.
+Then write a detailed comparison report covering:
+
+## Side-by-Side Comparison
+## Architectural Style Contrast
+## Scale & Massing
+## Facade & Materials
+## Strengths of Each
+## Verdict — Which is More Architecturally Significant and Why?
+
+Be specific, precise, and reference what you actually see.
+"""
+
+
+@app.route("/compare", methods=["POST"])
+def compare():
+    if "image_a" not in request.files or "image_b" not in request.files:
+        return jsonify({"error": "Two images required: image_a and image_b"}), 400
+
+    try:
+        fa, fb = request.files["image_a"], request.files["image_b"]
+        b64_a, mime_a = image_to_base64(fa.read(), fa.filename)
+        b64_b, mime_b = image_to_base64(fb.read(), fb.filename)
+    except Exception as e:
+        return jsonify({"error": f"Image processing failed: {str(e)}"}), 400
+
+    if not API_KEY:
+        return jsonify({"error": "No API key configured"}), 500
+
+    try:
+        client = Groq(api_key=API_KEY)
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_a};base64,{b64_a}"}},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_b};base64,{b64_b}"}},
+                    {"type": "text", "text": COMPARE_PROMPT},
+                ],
+            }],
+            max_tokens=4096,
+        )
+        raw = response.choices[0].message.content
+
+        # Extract spec for building A
+        m_a = re.search(r"```json-a\s*(.*?)```", raw, re.DOTALL)
+        spec_a = try_parse_json(m_a.group(1)) if m_a else {}
+        m_b = re.search(r"```json-b\s*(.*?)```", raw, re.DOTALL)
+        spec_b = try_parse_json(m_b.group(1)) if m_b else {}
+
+        report = raw
+        for pat in [r"```json-a.*?```", r"```json-b.*?```"]:
+            report = re.sub(pat, "", report, flags=re.DOTALL).strip()
+
+        return jsonify({
+            "spec_a": spec_a, "spec_b": spec_b,
+            "report": report,
+            "image_a": f"data:{mime_a};base64,{b64_a}",
+            "image_b": f"data:{mime_b};base64,{b64_b}",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = 5000
 
