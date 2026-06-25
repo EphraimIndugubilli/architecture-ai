@@ -199,6 +199,28 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/health")
+def health():
+    return jsonify({
+        "status": "ok",
+        "model": MODEL,
+        "api_key_set": bool(API_KEY),
+        "max_upload_mb": app.config["MAX_CONTENT_LENGTH"] // (1024 * 1024),
+    })
+
+
+@app.route("/models")
+def models():
+    return jsonify({
+        "current": MODEL,
+        "available": [
+            "meta-llama/llama-4-scout-17b-16e-instruct",
+            "meta-llama/llama-4-maverick-17b-128e-instruct",
+            "llama-3.3-70b-versatile",
+        ],
+    })
+
+
 @app.route("/analyze", methods=["POST"])
 def analyze():
     if "image" not in request.files:
