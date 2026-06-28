@@ -12,7 +12,7 @@ import os
 import re
 import sys
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 from groq import Groq
 from PIL import Image
 
@@ -258,6 +258,59 @@ def analyze():
         return jsonify({"spec": spec, "report": report, "image": image_data_url})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/analyze/stream", methods=["POST"])
+def analyze_stream():
+    """SSE-streaming version of /analyze — tokens arrive word-by-word."""
+    if "image" not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
+
+    file = request.files["image"]
+    if not file.filename:
+        return jsonify({"error": "Empty filename"}), 400
+
+    try:
+        file_bytes = file.read()
+        b64, mime = image_to_base64(file_bytes, file.filename)
+        image_data_url = f"data:{mime};base64,{b64}"
+    except Exception as e:
+        return jsonify({"error": f"Image processing failed: {str(e)}"}), 400
+
+    if not API_KEY:
+        return jsonify({"error": "No API key configured in arch_config.py"}), 500
+
+    @stream_with_context
+    def generate():
+        full_text = []
+        try:
+            client = Groq(api_key=API_KEY)
+            stream = client.chat.completions.create(
+                model=MODEL,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": image_data_url}},
+                        {"type": "text", "text": PROMPT},
+                    ],
+                }],
+                max_tokens=4096,
+                stream=True,
+            )
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    full_text.append(delta)
+                    yield f"data: {json.dumps({'type': 'token', 'text': delta})}\n\n"
+
+            raw_text = "".join(full_text)
+            spec, report = parse_response(raw_text)
+            yield f"data: {json.dumps({'type': 'done', 'spec': spec, 'report': report, 'image': image_data_url})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 COMPARE_PROMPT = """
