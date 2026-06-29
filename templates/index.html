@@ -757,6 +757,39 @@ function build3DModel(spec) {
     addBox(2, 5, 2, bW * 0.2, bH + 3.5, bD * 0.1, darkMat);
   }
 
+  // Balconies — rendered on front facade every other floor when has_balconies is true
+  if (spec.has_balconies) {
+    const balconyMat = new THREE.MeshPhongMaterial({ color: 0x2a3550, shininess: 20 });
+    const railMat    = new THREE.MeshPhongMaterial({ color: 0x445570, shininess: 60 });
+    const balconyW   = bW * 0.55;
+    const balconyD   = 1.8;
+    const balconyH   = 0.25;
+    const railH      = 1.0;
+    const railThick  = 0.12;
+    const startFloor = hasPodium ? podiumFloors : 1;
+    for (let f = startFloor; f < floors - 1; f += 2) {
+      const floorY = towerBase + f * fH + fH * 0.1;
+      // Balcony slab
+      const slabGeo = new THREE.BoxGeometry(balconyW, balconyH, balconyD);
+      const slab = new THREE.Mesh(slabGeo, balconyMat);
+      slab.position.set(0, floorY, bD / 2 + balconyD / 2);
+      slab.castShadow = true;
+      buildingGroup.add(slab);
+      // Front railing
+      const frontRailGeo = new THREE.BoxGeometry(balconyW, railH, railThick);
+      const frontRail = new THREE.Mesh(frontRailGeo, railMat);
+      frontRail.position.set(0, floorY + railH / 2, bD / 2 + balconyD - railThick / 2);
+      buildingGroup.add(frontRail);
+      // Side railings
+      for (const sx of [-balconyW / 2 + railThick / 2, balconyW / 2 - railThick / 2]) {
+        const sideRailGeo = new THREE.BoxGeometry(railThick, railH, balconyD);
+        const sideRail = new THREE.Mesh(sideRailGeo, railMat);
+        sideRail.position.set(sx, floorY + railH / 2, bD / 2 + balconyD / 2);
+        buildingGroup.add(sideRail);
+      }
+    }
+  }
+
   scene.add(buildingGroup);
 
   // Subtle point lights for atmosphere
