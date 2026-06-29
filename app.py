@@ -330,6 +330,136 @@ Be specific, precise, and reference what you actually see.
 """
 
 
+SUSTAINABILITY_PROMPT = """
+You are a certified green building consultant (LEED AP, BREEAM assessor). Analyze this architectural image and evaluate the building's environmental credentials.
+
+Output a JSON block (between ```json and ```) with these sustainability metrics:
+
+```json
+{
+  "overall_rating": "B",
+  "energy_efficiency_score": 65,
+  "solar_potential": "high",
+  "green_roof_potential": "medium",
+  "facade_heat_gain": "high",
+  "estimated_carbon_class": "D",
+  "natural_ventilation_potential": "low",
+  "embodied_carbon_estimate": "medium",
+  "leed_likely_category": "Silver",
+  "sustainability_strengths": ["compact massing reduces heat loss", "large south-facing glazing for passive solar"],
+  "sustainability_concerns": ["all-glass curtain wall increases cooling load", "no visible green infrastructure"],
+  "retrofit_recommendations": ["add external solar shading fins", "install green roof on podium", "photovoltaic cladding on south face"]
+}
+```
+
+Rating scale: A+ (best) to F (worst)
+Solar potential: high/medium/low based on visible roof area and glazing orientation
+Facade heat gain: high/medium/low (glass = high, masonry = low)
+Carbon class: A–G (like EU EPC labels)
+LEED likely: Platinum / Gold / Silver / Certified / Unlikely
+
+Then write a sustainability report:
+
+## Green Building Overview
+## Energy Performance
+## Carbon & Materials Assessment
+## Passive Design Strategies
+## Retrofit Potential
+## Sustainability Score: X/10
+
+Be specific to what you actually see in this building. Identify the architectural style's inherent sustainability characteristics.
+"""
+
+
+@app.route("/sustainability", methods=["POST"])
+def sustainability():
+    """Analyze a building image for green/sustainability metrics using LLaMA vision."""
+    if "image" not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
+
+    file = request.files["image"]
+    if not file.filename:
+        return jsonify({"error": "Empty filename"}), 400
+
+    try:
+        file_bytes = file.read()
+        b64, mime = image_to_base64(file_bytes, file.filename)
+        image_data_url = f"data:{mime};base64,{b64}"
+    except Exception as e:
+        return jsonify({"error": f"Image processing failed: {str(e)}"}), 400
+
+    if not API_KEY:
+        return jsonify({"error": "No API key configured in arch_config.py"}), 500
+
+    try:
+        client = Groq(api_key=API_KEY)
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_data_url}},
+                    {"type": "text", "text": SUSTAINABILITY_PROMPT},
+                ],
+            }],
+            max_tokens=2048,
+        )
+        raw_text = response.choices[0].message.content
+
+        # Extract JSON metrics
+        metrics: dict = {}
+        match = re.search(r"```json\s*(.*?)```", raw_text, re.DOTALL)
+        if match:
+            metrics = try_parse_json(match.group(1))
+
+        # Extract report text
+        report = raw_text
+        report_match = re.search(r"```.*?```\s*(.*)", raw_text, re.DOTALL)
+        if report_match:
+            report = report_match.group(1).strip()
+        elif "## Green Building" in raw_text:
+            report = raw_text[raw_text.index("## Green Building"):]
+
+        # Validate and clamp fields
+        valid_ratings = ["A+", "A", "A-", "B+", "B", "B-", "C+", "C", "C-", "D", "E", "F"]
+        metrics["overall_rating"] = (
+            metrics.get("overall_rating", "C")
+            if metrics.get("overall_rating") in valid_ratings else "C"
+        )
+        try:
+            score = int(metrics.get("energy_efficiency_score", 50) or 50)
+            metrics["energy_efficiency_score"] = max(0, min(100, score))
+        except (TypeError, ValueError):
+            metrics["energy_efficiency_score"] = 50
+
+        for field in ["solar_potential", "green_roof_potential", "facade_heat_gain",
+                      "natural_ventilation_potential", "embodied_carbon_estimate"]:
+            metrics[field] = (
+                metrics.get(field, "medium")
+                if metrics.get(field) in ("high", "medium", "low") else "medium"
+            )
+
+        valid_carbon = list("ABCDEFG")
+        metrics["estimated_carbon_class"] = (
+            metrics.get("estimated_carbon_class", "D")
+            if metrics.get("estimated_carbon_class") in valid_carbon else "D"
+        )
+
+        valid_leed = ["Platinum", "Gold", "Silver", "Certified", "Unlikely"]
+        metrics["leed_likely_category"] = (
+            metrics.get("leed_likely_category", "Unlikely")
+            if metrics.get("leed_likely_category") in valid_leed else "Unlikely"
+        )
+
+        for field in ["sustainability_strengths", "sustainability_concerns", "retrofit_recommendations"]:
+            val = metrics.get(field, [])
+            metrics[field] = val if isinstance(val, list) else []
+
+        return jsonify({"metrics": metrics, "report": report})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/compare", methods=["POST"])
 def compare():
     if "image_a" not in request.files or "image_b" not in request.files:
