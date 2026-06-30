@@ -561,11 +561,12 @@ function parseReport(text) {
 }
 
 // ── Three.js 3D Building ───────────────────────────────────────────────────
-let renderer, scene, camera, controls, animFrame;
+let renderer, scene, camera, controls, animFrame, resizeHandler;
 
 function build3DModel(spec) {
   const canvas = document.getElementById('three-canvas');
   if (renderer) { renderer.dispose(); cancelAnimationFrame(animFrame); }
+  if (resizeHandler) { window.removeEventListener('resize', resizeHandler); resizeHandler = null; }
 
   // Scene
   scene = new THREE.Scene();
@@ -809,12 +810,13 @@ function build3DModel(spec) {
   animate();
 
   // Resize
-  window.addEventListener('resize', () => {
+  resizeHandler = () => {
     const w2 = canvas.clientWidth, h2 = canvas.clientHeight || 520;
     camera.aspect = w2 / h2;
     camera.updateProjectionMatrix();
     renderer.setSize(w2, h2);
-  });
+  };
+  window.addEventListener('resize', resizeHandler);
 }
 
 // Load history on page start
