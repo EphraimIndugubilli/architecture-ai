@@ -282,6 +282,7 @@
 <div id="results-zone">
   <div class="results-header">
     <h2 id="building-title">Virtual Architecture</h2>
+    <span id="confidence-badge" style="display:none"></span>
     <div>
       <button class="export-btn" onclick="exportReport()">⬇ Export Report</button>
       <button class="new-btn" onclick="reset()">← New Analysis</button>
@@ -504,6 +505,20 @@ function renderResults(data) {
   const spec = data.spec;
   document.getElementById('building-title').textContent = spec.style + ' Building';
   document.getElementById('source-img').src = data.image;
+
+  // Extraction confidence — 2026 AI UX trend: surface a confidence
+  // indicator instead of presenting AI-extracted specs as ground truth.
+  const conf = spec.extraction_confidence;
+  const badge = document.getElementById('confidence-badge');
+  if (typeof conf === 'number') {
+    const color = conf >= 75 ? '#3ddc84' : conf >= 45 ? '#f5b942' : '#ff6b6b';
+    badge.style.display = 'inline-block';
+    badge.style.cssText += `margin-left:12px;padding:3px 10px;border-radius:20px;font-size:12px;font-weight:600;background:${color}22;color:${color};border:1px solid ${color}55;`;
+    badge.textContent = `${conf}% extraction confidence`;
+    badge.title = 'How confident the AI is in the extracted spec values, based on image clarity.';
+  } else {
+    badge.style.display = 'none';
+  }
 
   // Spec grid
   const sg = document.getElementById('spec-grid');

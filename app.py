@@ -53,7 +53,8 @@ STEP 1 — Output a JSON block (between ```json and ```) with exact values extra
   "has_entrance_canopy": true,
   "has_podium": false,
   "podium_floors": 0,
-  "setbacks": 0
+  "setbacks": 0,
+  "extraction_confidence": 85
 }
 ```
 
@@ -68,6 +69,7 @@ Rules for the JSON values:
 - "has_balconies": true only if balconies are clearly visible
 - "has_podium": true if the building has a wider base section
 - "setbacks": count visible stepped setbacks on upper floors
+- "extraction_confidence": 0-100 — how confident you are in the extracted values above, based on image clarity, angle, occlusion, and resolution. Lower this for blurry, distant, heavily cropped, or partially obscured buildings.
 
 STEP 2 — Write a detailed architecture report:
 
@@ -178,6 +180,7 @@ def parse_response(text: str) -> tuple[dict, str]:
     spec["has_podium"] = bool(spec.get("has_podium", False))
     spec["podium_floors"] = int(clamp(spec.get("podium_floors"), 0, 20, 0))
     spec["setbacks"] = int(clamp(spec.get("setbacks"), 0, 5, 0))
+    spec["extraction_confidence"] = int(clamp(spec.get("extraction_confidence"), 0, 100, 60))
 
     # Facade color — validate hex
     color = str(spec.get("facade_color", "#6fa8c8"))
