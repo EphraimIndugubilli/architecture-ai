@@ -765,6 +765,27 @@ function build3DModel(spec) {
     const rMesh = new THREE.Mesh(rGeo, facadeMat);
     rMesh.position.y = bH;
     buildingGroup.add(rMesh);
+  } else if (spec.roof === 'spire') {
+    // Narrow octagonal base ring then a tall tapering spire — classic Gothic / Neo-Gothic
+    const baseGeo = new THREE.CylinderGeometry(Math.min(bW, bD) * 0.12, Math.min(bW, bD) * 0.2, bH * 0.08, 8);
+    const baseMesh = new THREE.Mesh(baseGeo, darkMat);
+    baseMesh.position.y = bH + bH * 0.04;
+    buildingGroup.add(baseMesh);
+    const spireGeo = new THREE.ConeGeometry(Math.min(bW, bD) * 0.1, bH * 0.45, 8);
+    const spireMesh = new THREE.Mesh(spireGeo, darkMat);
+    spireMesh.position.y = bH + bH * 0.08 + bH * 0.225;
+    spireMesh.castShadow = true;
+    buildingGroup.add(spireMesh);
+    // Flat parapet around base of spire
+    addBox(bW + 0.8, 0.8, bD + 0.8, 0, bH + 0.4, 0, concMat);
+  } else if (spec.roof === 'setback') {
+    // Ziggurat-style stepped setback at the roof level
+    const steps = 3;
+    const stepH = bH * 0.06;
+    for (let s = 0; s < steps; s++) {
+      const scale = 1 - s * 0.25;
+      addBox(bW * scale, stepH, bD * scale, 0, bH + s * stepH + stepH / 2, 0, darkMat);
+    }
   } else {
     // Flat roof parapet
     addBox(bW + 1, 1.2, bD + 1, 0, bH + 0.6, 0, darkMat);
