@@ -13,11 +13,13 @@ import re
 import sys
 
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
+from flask_cors import CORS
 from groq import Groq
 from PIL import Image
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024  # 20MB max upload
+CORS(app, resources={r"/api/*": {"origins": "*"}, r"/energy-class": {"origins": "*"}, r"/health": {"origins": "*"}, r"/models": {"origins": "*"}})
 
 # ── Config ────────────────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -512,6 +514,120 @@ def compare():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/energy-class", methods=["POST"])
+def energy_class():
+    """Estimate EPC energy-efficiency class (A++ → G) from a building spec.
+
+    Accepts the same JSON spec that /analyze returns. The scoring is
+    rule-based (deterministic), not AI-generated, so it is cheap to call
+    and suitable for real-time UI display alongside the spec extraction.
+
+    2026 context: European and Indian GBC regulations increasingly require
+    an energy performance estimate at design time. Integrating a quick
+    EPC estimate directly into the analysis flow reduces friction for
+    architects using the tool professionally.
+
+    Request body (JSON): same spec dict as returned by /analyze.
+    Returns: { "class": "B", "score": 68, "label": "Good", "factors": [...], "tips": [...] }
+    """
+    spec = request.get_json(silent=True) or {}
+
+    score = 70  # baseline for an average modern building
+
+    # Facade material: glass is worst insulator; stone/brick best
+    material_delta = {
+        "glass":    -20,
+        "concrete":  -5,
+        "mixed":     -5,
+        "brick":     +8,
+        "stone":    +12,
+    }
+    material = str(spec.get("facade_material", "concrete")).lower()
+    score += material_delta.get(material, 0)
+
+    # Window density: window_cols * window_rows / floors gives glazing intensity
+    cols    = int(spec.get("window_cols", 4))
+    rows    = int(spec.get("window_rows", 10))
+    floors  = max(1, int(spec.get("floors", 10)))
+    glazing = (cols * rows) / (floors * 4)  # normalised 0–~5
+    score -= min(15, int(glazing * 6))       # max –15 for very high glazing
+
+    # Balconies: thermal bridging
+    if spec.get("has_balconies"):
+        score -= 5
+
+    # Entrance canopy shades ground-floor glazing
+    if spec.get("has_entrance_canopy"):
+        score += 2
+
+    # Podium base reduces exposed envelope per floor above it
+    if spec.get("has_podium") and int(spec.get("podium_floors", 0)) >= 2:
+        score += 3
+
+    # Roof type: pitched traps more air; dome is well-insulating
+    roof_delta = {"pitched": +8, "dome": +5, "flat": 0, "setback": +3, "spire": +4}
+    roof = str(spec.get("roof", "flat")).lower()
+    score += roof_delta.get(roof, 0)
+
+    # Setbacks reduce wind exposure on upper floors
+    setbacks = int(spec.get("setbacks", 0))
+    score += min(6, setbacks * 2)
+
+    # Tall buildings lose more heat through external surface area
+    height = int(spec.get("height", 30))
+    if height > 60:
+        score -= 8
+    elif height > 30:
+        score -= 4
+
+    score = max(0, min(100, score))
+
+    # Map score → EPC class
+    if   score >= 95: cls, label = "A++", "Net Zero / Passive"
+    elif score >= 85: cls, label = "A+",  "Excellent"
+    elif score >= 75: cls, label = "A",   "Very Good"
+    elif score >= 65: cls, label = "B",   "Good"
+    elif score >= 55: cls, label = "C",   "Average"
+    elif score >= 45: cls, label = "D",   "Below Average"
+    elif score >= 35: cls, label = "E",   "Poor"
+    elif score >= 25: cls, label = "F",   "Very Poor"
+    else:             cls, label = "G",   "Non-Compliant"
+
+    factors: list[str] = []
+    tips: list[str] = []
+
+    if material == "glass":
+        factors.append("All-glass facade has very low insulation value (U-value ~2–6 W/m²K).")
+        tips.append("Specify triple-glazed unitised curtain wall with low-e coating to recover 10–15 points.")
+    elif material in ("brick", "stone"):
+        factors.append(f"{material.title()} facade provides good thermal mass and moderate insulation.")
+    if glazing > 1.5:
+        factors.append(f"High window density ({cols}×{rows} grid) increases solar gain and heat loss.")
+        tips.append("Add external shading fins or electrochromic glass to cut solar gain by 30–40%.")
+    if spec.get("has_balconies"):
+        factors.append("Balconies create thermal bridging at every slab edge.")
+        tips.append("Use thermally broken balcony connectors to reduce bridging penalty.")
+    if roof == "flat":
+        tips.append("Green roof or white reflective membrane on flat roof can add 5–8 points.")
+    if height > 60:
+        factors.append(f"High-rise ({height} m) has large exposed envelope-to-floor-area ratio.")
+        tips.append("Increase insulation thickness on curtain wall spandrel panels.")
+
+    if not factors:
+        factors.append("No major negative factors detected for this spec.")
+    if not tips:
+        tips.append("Building appears reasonably efficient for its typology — focus on HVAC optimisation.")
+
+    return jsonify({
+        "class": cls,
+        "score": score,
+        "label": label,
+        "factors": factors,
+        "tips": tips,
+        "note": "Estimate based on extracted spec only — commission a certified EPC assessment for regulatory purposes.",
+    })
 
 
 if __name__ == "__main__":
