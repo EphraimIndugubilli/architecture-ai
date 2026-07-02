@@ -634,6 +634,110 @@ def energy_class():
     })
 
 
+SHADOW_HOURS = [8, 10, 12, 14, 16, 18]
+
+
+@app.route("/shadow-analysis", methods=["POST"])
+def shadow_analysis():
+    """Deterministic solar shadow analysis from a building spec.
+
+    Accepts the same JSON spec returned by /analyze and computes approximate
+    shadow length and cardinal bearing at six times of day (8 am → 6 pm) for
+    any latitude/longitude. No AI cost — pure trigonometry.
+
+    2026 green-building context: shadow-casting data is increasingly required
+    at design time for daylight-access compliance (UK BRE 209, Indian NBC
+    Part 8). Integrating it directly into the analysis flow saves architects
+    a separate tool switch.
+
+    Request body: { ...spec, latitude: 28.6, longitude: 77.2, month: 6 }
+    latitude and longitude default to New Delhi if omitted.
+    month (1-12) determines solar declination; defaults to 6 (summer solstice).
+    """
+    import math
+
+    body = request.get_json(silent=True) or {}
+    height = float(body.get("height", 30))
+    lat_deg = float(body.get("latitude", 28.6))
+    month = int(body.get("month", 6))
+    height = max(1.0, min(600.0, height))
+    lat = math.radians(max(-90.0, min(90.0, lat_deg)))
+
+    # Solar declination (°) via Spencer approximation — max ≈ ±23.45° at solstices
+    day_of_year = {1: 15, 2: 46, 3: 75, 4: 106, 5: 136, 6: 167,
+                   7: 197, 8: 228, 9: 259, 10: 289, 11: 320, 12: 350}.get(month, 167)
+    B = math.radians((360 / 365) * (day_of_year - 81))
+    decl = math.radians(23.45 * math.sin(B))
+
+    timeline = []
+    for hour in SHADOW_HOURS:
+        # Hour angle: 0 at solar noon; negative morning, positive afternoon
+        hour_angle = math.radians((hour - 12) * 15)
+
+        # Solar altitude angle
+        sin_alt = (math.sin(lat) * math.sin(decl)
+                   + math.cos(lat) * math.cos(decl) * math.cos(hour_angle))
+        altitude_rad = math.asin(max(-1.0, min(1.0, sin_alt)))
+        altitude_deg = math.degrees(altitude_rad)
+
+        if altitude_deg <= 0:
+            # Sun below horizon — no shadow length computable
+            timeline.append({
+                "hour": hour,
+                "label": f"{hour:02d}:00",
+                "sun_altitude_deg": round(altitude_deg, 1),
+                "shadow_length_m": None,
+                "shadow_bearing": None,
+                "above_horizon": False,
+            })
+            continue
+
+        shadow_length = height / math.tan(altitude_rad)
+
+        # Solar azimuth (bearing of the sun from North, clockwise)
+        cos_az = ((math.sin(decl) - math.sin(lat) * sin_alt)
+                  / (math.cos(lat) * math.cos(altitude_rad) + 1e-9))
+        cos_az = max(-1.0, min(1.0, cos_az))
+        azimuth = math.degrees(math.acos(cos_az))
+        if hour > 12:
+            azimuth = 360 - azimuth  # afternoon: sun moves to west
+
+        # Shadow falls opposite the sun (180° flip)
+        shadow_bearing = (azimuth + 180) % 360
+
+        timeline.append({
+            "hour": hour,
+            "label": f"{hour:02d}:00",
+            "sun_altitude_deg": round(altitude_deg, 1),
+            "sun_azimuth_deg": round(azimuth, 1),
+            "shadow_length_m": round(shadow_length, 1),
+            "shadow_bearing": round(shadow_bearing, 1),
+            "shadow_direction": _bearing_to_cardinal(shadow_bearing),
+            "above_horizon": True,
+        })
+
+    above = [t for t in timeline if t["above_horizon"] and t["shadow_length_m"] is not None]
+    max_shadow = max((t["shadow_length_m"] for t in above), default=None)
+    min_shadow = min((t["shadow_length_m"] for t in above), default=None)
+
+    return jsonify({
+        "building_height_m": height,
+        "latitude": lat_deg,
+        "month": month,
+        "timeline": timeline,
+        "max_shadow_length_m": round(max_shadow, 1) if max_shadow else None,
+        "min_shadow_length_m": round(min_shadow, 1) if min_shadow else None,
+        "note": "Approximate shadow analysis based on solar geometry. Commission a certified daylight study for planning/compliance purposes.",
+    })
+
+
+def _bearing_to_cardinal(bearing: float) -> str:
+    dirs = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+            "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+    idx = round(bearing / 22.5) % 16
+    return dirs[idx]
+
+
 if __name__ == "__main__":
     port = 5000
 
