@@ -120,6 +120,44 @@ def try_parse_json(raw: str) -> dict:
         return {}
 
 
+def _clamp(val, lo, hi, default):
+    try:
+        v = float(val)
+        return max(lo, min(hi, v))
+    except (TypeError, ValueError):
+        return default
+
+
+def validate_spec(spec: dict) -> dict:
+    """Clamp and type-coerce a raw extracted spec dict into safe, bounded values."""
+    spec["style"]               = str(spec.get("style", "Contemporary"))
+    spec["width"]               = _clamp(spec.get("width"), 5, 500, 35)
+    spec["depth"]               = _clamp(spec.get("depth"), 5, 500, 28)
+    spec["height"]              = _clamp(spec.get("height"), 3, 600, 55)
+    spec["floors"]              = int(_clamp(spec.get("floors"), 1, 150, 14))
+    spec["floor_height"]        = _clamp(spec.get("floor_height"), 2, 10, 4)
+    spec["roof"]                = spec.get("roof", "flat") if spec.get("roof") in ("flat","pitched","dome","setback","spire","complex") else "flat"
+    spec["facade_material"]     = spec.get("facade_material", "glass") if spec.get("facade_material") in ("glass","concrete","brick","stone","mixed") else "glass"
+    spec["window_cols"]         = int(_clamp(spec.get("window_cols"), 1, 30, 5))
+    spec["window_rows"]         = int(_clamp(spec.get("window_rows"), 1, 150, spec["floors"]))
+    spec["has_balconies"]       = bool(spec.get("has_balconies", False))
+    spec["has_entrance_canopy"] = bool(spec.get("has_entrance_canopy", True))
+    spec["has_podium"]          = bool(spec.get("has_podium", False))
+    spec["podium_floors"]       = int(_clamp(spec.get("podium_floors"), 0, 20, 0))
+    spec["setbacks"]            = int(_clamp(spec.get("setbacks"), 0, 5, 0))
+    spec["extraction_confidence"] = int(_clamp(spec.get("extraction_confidence"), 0, 100, 60))
+
+    color = str(spec.get("facade_color", "#6fa8c8"))
+    if not re.match(r"^#[0-9a-fA-F]{6}$", color):
+        material_colors = {
+            "glass": "#4a90d9", "concrete": "#8a9bb0",
+            "brick": "#b5643c", "stone": "#9a8870", "mixed": "#7a8fa8"
+        }
+        color = material_colors.get(spec["facade_material"], "#6fa8c8")
+    spec["facade_color"] = color
+    return spec
+
+
 def parse_response(text: str) -> tuple[dict, str]:
     """Extract 3D spec JSON and report text from AI response."""
     spec = {}
@@ -159,41 +197,7 @@ def parse_response(text: str) -> tuple[dict, str]:
         if r:
             report = r.group(1).strip()
 
-    # Validate / clamp spec values
-    def clamp(val, lo, hi, default):
-        try:
-            v = float(val)
-            return max(lo, min(hi, v))
-        except (TypeError, ValueError):
-            return default
-
-    spec["style"]             = str(spec.get("style", "Contemporary"))
-    spec["width"]             = clamp(spec.get("width"), 5, 500, 35)
-    spec["depth"]             = clamp(spec.get("depth"), 5, 500, 28)
-    spec["height"]            = clamp(spec.get("height"), 3, 600, 55)
-    spec["floors"]            = int(clamp(spec.get("floors"), 1, 150, 14))
-    spec["floor_height"]      = clamp(spec.get("floor_height"), 2, 10, 4)
-    spec["roof"]              = spec.get("roof", "flat") if spec.get("roof") in ("flat","pitched","dome","setback","spire","complex") else "flat"
-    spec["facade_material"]   = spec.get("facade_material", "glass") if spec.get("facade_material") in ("glass","concrete","brick","stone","mixed") else "glass"
-    spec["window_cols"]       = int(clamp(spec.get("window_cols"), 1, 30, 5))
-    spec["window_rows"]       = int(clamp(spec.get("window_rows"), 1, 150, spec["floors"]))
-    spec["has_balconies"] = bool(spec.get("has_balconies", False))
-    spec["has_entrance_canopy"] = bool(spec.get("has_entrance_canopy", True))
-    spec["has_podium"] = bool(spec.get("has_podium", False))
-    spec["podium_floors"] = int(clamp(spec.get("podium_floors"), 0, 20, 0))
-    spec["setbacks"] = int(clamp(spec.get("setbacks"), 0, 5, 0))
-    spec["extraction_confidence"] = int(clamp(spec.get("extraction_confidence"), 0, 100, 60))
-
-    # Facade color — validate hex
-    color = str(spec.get("facade_color", "#6fa8c8"))
-    if not re.match(r"^#[0-9a-fA-F]{6}$", color):
-        material_colors = {
-            "glass": "#4a90d9", "concrete": "#8a9bb0",
-            "brick": "#b5643c", "stone": "#9a8870", "mixed": "#7a8fa8"
-        }
-        color = material_colors.get(spec["facade_material"], "#6fa8c8")
-    spec["facade_color"] = color
-
+    spec = validate_spec(spec)
     return spec, report
 
 
@@ -496,11 +500,11 @@ def compare():
         )
         raw = response.choices[0].message.content
 
-        # Extract spec for building A
+        # Extract and validate specs for both buildings
         m_a = re.search(r"```json-a\s*(.*?)```", raw, re.DOTALL)
-        spec_a = try_parse_json(m_a.group(1)) if m_a else {}
+        spec_a = validate_spec(try_parse_json(m_a.group(1)) if m_a else {})
         m_b = re.search(r"```json-b\s*(.*?)```", raw, re.DOTALL)
-        spec_b = try_parse_json(m_b.group(1)) if m_b else {}
+        spec_b = validate_spec(try_parse_json(m_b.group(1)) if m_b else {})
 
         report = raw
         for pat in [r"```json-a.*?```", r"```json-b.*?```"]:
