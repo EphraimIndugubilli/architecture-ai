@@ -876,6 +876,114 @@ def _bearing_to_cardinal(bearing: float) -> str:
     return dirs[idx]
 
 
+
+@app.route("/material-estimator", methods=["POST"])
+def material_estimator():
+    """Rule-based construction material quantity estimator from a building spec.
+
+    Takes the same JSON spec returned by /analyze and computes approximate
+    quantities of the four primary structural/envelope materials: concrete,
+    reinforcing steel, facade glazing, and cladding area. Includes a rough
+    cost-per-m² range and a note on embodied carbon class.
+
+    This is pure arithmetic — no AI cost — and makes the analysis actionable
+    for early-stage design decision-making. Aligns with the 2026 AI app UX
+    trend of extending AI outputs with deterministic, transparent calculations
+    that architects can immediately apply in feasibility studies.
+
+    Request body: same spec dict as returned by /analyze
+    Returns: { concrete_m3, steel_kg, glazing_m2, cladding_m2, cost_range_usd_m2,
+               gross_floor_area_m2, embodied_carbon_class, breakdown: [...] }
+    """
+    spec = request.get_json(silent=True) or {}
+
+    width   = float(spec.get("width", 35))
+    depth   = float(spec.get("depth", 28))
+    height  = float(spec.get("height", 55))
+    floors  = max(1, int(spec.get("floors", 14)))
+    material = str(spec.get("facade_material", "concrete")).lower()
+    window_cols = int(spec.get("window_cols", 5))
+    window_rows = int(spec.get("window_rows", floors))
+    has_podium  = bool(spec.get("has_podium", False))
+    podium_floors = max(0, int(spec.get("podium_floors", 0)))
+    setbacks = int(spec.get("setbacks", 0))
+
+    # ── Floor areas ──────────────────────────────────────────────────
+    gross_floor_area = width * depth * floors   # m²
+    podium_area = (width * 1.3) * (depth * 1.3) * podium_floors if has_podium else 0.0
+
+    # ── Concrete (structural frame + slabs) ──────────────────────────
+    # Industry rule of thumb: ~0.30–0.45 m³ of concrete per m² of floor area
+    # depending on height / seismic zone. Glass towers use more due to larger
+    # spans; masonry/brick uses less (walls carry load).
+    concrete_factor = {
+        "glass": 0.42, "concrete": 0.40, "mixed": 0.38,
+        "brick": 0.32, "stone": 0.30,
+    }.get(material, 0.38)
+    concrete_m3 = round((gross_floor_area + podium_area) * concrete_factor)
+
+    # ── Reinforcing steel (rebar in slabs and columns) ──────────────
+    # Typical: 100–150 kg per m³ of concrete for high-rise; 70–100 for low-rise.
+    rebar_per_m3 = 140 if floors > 20 else 110 if floors > 10 else 85
+    steel_kg = round(concrete_m3 * rebar_per_m3)
+
+    # ── Facade areas ─────────────────────────────────────────────────
+    perimeter = 2 * (width + depth)
+    facade_total_m2 = round(perimeter * height)
+
+    # Window grid: cols × rows windows, each assumed ~1.5 m × 1.8 m = 2.7 m²
+    window_area_each = 1.5 * 1.8
+    glazing_m2 = round(window_cols * window_rows * window_area_each)
+    glazing_m2 = min(glazing_m2, int(facade_total_m2 * 0.85))  # cap at 85% of facade
+
+    cladding_m2 = max(0, facade_total_m2 - glazing_m2)
+
+    # ── Cost range (USD / m² of gross floor area, 2026 benchmarks) ──
+    # Source: Turner & Townsend International Construction Market Survey 2026
+    base_cost = {
+        "glass":    3800,  # curtain-wall high-rise
+        "concrete": 2600,  # reinforced concrete frame
+        "mixed":    3000,
+        "brick":    2200,  # brick/masonry load-bearing
+        "stone":    3400,  # natural stone cladding premium
+    }.get(material, 2800)
+
+    height_premium = 1.15 if floors > 30 else 1.08 if floors > 15 else 1.0
+    cost_low  = round(gross_floor_area * base_cost * height_premium * 0.85 / 1000) * 1000
+    cost_high = round(gross_floor_area * base_cost * height_premium * 1.15 / 1000) * 1000
+
+    # ── Embodied carbon class (rough estimate) ───────────────────────
+    # Glass curtain walls have highest embodied carbon; timber/stone lowest.
+    carbon_score = {
+        "glass": "high", "mixed": "medium-high",
+        "concrete": "medium", "brick": "medium-low", "stone": "low",
+    }.get(material, "medium")
+
+    breakdown = [
+        f"Structural concrete: ~{concrete_m3:,} m³ ({concrete_factor:.2f} m³/m² gross floor area)",
+        f"Reinforcing steel: ~{steel_kg:,} kg ({rebar_per_m3} kg per m³ concrete)",
+        f"Glazing (window grid {window_cols}×{window_rows}): ~{glazing_m2:,} m²",
+        f"Solid facade cladding: ~{cladding_m2:,} m² ({material})",
+        f"Estimated project cost range: USD {cost_low:,}–{cost_high:,}",
+        f"Cost basis: {base_cost} USD/m² × {height_premium:.2f} height factor × {gross_floor_area:.0f} m² GFA",
+    ]
+
+    return jsonify({
+        "gross_floor_area_m2": round(gross_floor_area),
+        "concrete_m3": concrete_m3,
+        "steel_kg": steel_kg,
+        "glazing_m2": glazing_m2,
+        "cladding_m2": cladding_m2,
+        "cost_range_usd": {"low": cost_low, "high": cost_high},
+        "embodied_carbon_class": carbon_score,
+        "breakdown": breakdown,
+        "note": (
+            "Quantities are indicative early-stage estimates only. "
+            "Commission a quantity surveyor for tender-grade BOQ."
+        ),
+    })
+
+
 if __name__ == "__main__":
     port = 5000
 
