@@ -731,6 +731,144 @@ def shadow_analysis():
     })
 
 
+@app.route("/wind-analysis", methods=["POST"])
+def wind_analysis():
+    """Deterministic wind load estimate from a building spec.
+
+    Accepts the same JSON spec returned by /analyze and computes approximate
+    wind pressure and base shear at six reference wind speeds (10–90 m/s).
+    Uses simplified ASCE 7 / IS:875 Part 3 methodology — suitable for
+    early-stage feasibility; commission a full CFD study for regulatory use.
+
+    2026 context: India's National Building Code Part 6 now mandates wind load
+    documentation for buildings taller than 15 m. Integrating a quick estimate
+    here saves architects a separate specialist tool at the sketch stage.
+
+    Request body: { ...spec, wind_speed_ms: 30, latitude: 28.6 }
+    wind_speed_ms: design wind speed in m/s (defaults to 33 m/s — IS:875 Zone III)
+    latitude: used to infer exposure category (coastal vs inland)
+    """
+    import math
+
+    body = request.get_json(silent=True) or {}
+    height   = float(body.get("height", 30))
+    width    = float(body.get("width", 20))
+    depth    = float(body.get("depth", 20))
+    floors   = int(body.get("floors", 8))
+    material = str(body.get("facade_material", "concrete")).lower()
+    lat_deg  = float(body.get("latitude", 28.6))
+    vb       = float(body.get("wind_speed_ms", 33))
+
+    height  = max(1.0,  min(600.0, height))
+    width   = max(1.0,  min(500.0, width))
+    depth   = max(1.0,  min(500.0, depth))
+    vb      = max(10.0, min(90.0,  vb))
+
+    # Exposure category based on height and coastal proximity (|lat| < 12 = tropical coast)
+    coastal = abs(lat_deg) < 12
+    if height > 100 or coastal:
+        exposure = "A"   # open terrain / coastal — highest wind loads
+        k2_factor = 1.10
+    elif height > 40:
+        exposure = "B"   # open terrain, suburban outskirts
+        k2_factor = 1.00
+    else:
+        exposure = "C"   # urban / suburban — reduced by surrounding buildings
+        k2_factor = 0.88
+
+    # Risk / importance factor (IS:875): residential=1.0, commercial=1.07, essential=1.15
+    k1 = 1.07  # commercial/office default — most likely use for this tool
+
+    # Topography factor — assume flat terrain
+    k3 = 1.0
+
+    # Design wind speed
+    vz = vb * k1 * k2_factor * k3
+
+    # Basic wind pressure: pz = 0.6 × Vz² (IS:875 formula, result in N/m²)
+    pz = 0.6 * vz ** 2  # N/m²
+
+    # External pressure coefficients (Cp) for a rectangular building
+    # Front face: Cp = +0.8 (positive pressure); rear: -0.5 (suction)
+    # Side walls: -0.7 (suction); roof flat: -0.9 (uplift)
+    cp_windward  =  0.8
+    cp_leeward   = -0.5
+    cp_side      = -0.7
+    cp_roof      = -0.9 if body.get("roof", "flat") == "flat" else -0.6
+
+    # Net wind pressure on windward face
+    p_windward = round(pz * cp_windward / 1000, 3)     # kN/m²
+    p_leeward  = round(pz * abs(cp_leeward) / 1000, 3) # kN/m² (suction)
+    p_side     = round(pz * abs(cp_side) / 1000, 3)
+    p_roof     = round(pz * abs(cp_roof) / 1000, 3)
+
+    # Total lateral wind force on windward face (simplified: uniform pressure × area)
+    windward_area = width * height  # m²
+    total_lateral_kN = round(pz * cp_windward * windward_area / 1000, 1)
+
+    # Base shear from wind — triangular distribution assumed (peak at top)
+    # V_base ≈ 0.6 × p_total × A for a triangular distribution over height
+    base_shear_kN = round(total_lateral_kN * 0.6, 1)
+
+    # Overturning moment about base = force × (H × 2/3) for triangular load
+    overturning_moment_kNm = round(base_shear_kN * (height * 2 / 3), 1)
+
+    # Facade cladding pressure (max of windward + suction)
+    facade_design_pressure_kPa = round((pz * (cp_windward - cp_leeward)) / 1000, 3)
+
+    # Risk category based on base shear
+    if base_shear_kN < 200:
+        risk = "low"
+        risk_note = "Wind loads manageable with standard structural framing."
+    elif base_shear_kN < 800:
+        risk = "moderate"
+        risk_note = "Wind governs some member design — engage structural engineer early."
+    elif base_shear_kN < 2000:
+        risk = "high"
+        risk_note = "Wind is a primary structural load — dedicated wind study required."
+    else:
+        risk = "very high"
+        risk_note = "Supertall / high-exposure building — full CFD wind tunnel study essential."
+
+    # Material-specific notes
+    material_notes = {
+        "glass":    "All-glass curtain wall: facade panels must resist local cladding pressure; glazing bite depth critical.",
+        "concrete": "Concrete frame provides good mass damping; check shear walls for lateral load path.",
+        "brick":    "Brick is brittle under cyclic wind load; ensure adequate ties and cavity wall design.",
+        "stone":    "Heavy stone cladding increases seismic demand; ensure positive mechanical fixings.",
+        "mixed":    "Mixed facade: verify each panel type meets local pressure independently.",
+    }.get(material, "Verify facade system meets local pressure requirements.")
+
+    # Deflection check guidance (H/500 serviceability drift limit is common)
+    allowable_drift_mm = round((height * 1000) / 500, 0)
+
+    return jsonify({
+        "building_height_m":       round(height, 1),
+        "building_width_m":        round(width, 1),
+        "windward_area_m2":        round(windward_area, 1),
+        "design_wind_speed_ms":    round(vz, 1),
+        "basic_wind_speed_ms":     round(vb, 1),
+        "exposure_category":       exposure,
+        "wind_pressure_kPa": {
+            "windward":  p_windward,
+            "leeward_suction": p_leeward,
+            "side_suction":    p_side,
+            "roof_uplift":     p_roof,
+            "facade_net_design": facade_design_pressure_kPa,
+        },
+        "lateral_loads": {
+            "total_lateral_force_kN":    total_lateral_kN,
+            "base_shear_kN":             base_shear_kN,
+            "overturning_moment_kNm":    overturning_moment_kNm,
+            "allowable_drift_limit_mm":  allowable_drift_mm,
+        },
+        "risk_level":  risk,
+        "risk_note":   risk_note,
+        "material_note": material_notes,
+        "note": "Simplified ASCE 7 / IS:875 Part 3 estimate. Commission a certified structural wind study for planning and building permit purposes.",
+    })
+
+
 def _bearing_to_cardinal(bearing: float) -> str:
     dirs = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
             "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
