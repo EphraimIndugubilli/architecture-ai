@@ -313,6 +313,17 @@
     <div class="spec-card">
       <h3>Building Specifications</h3>
       <div class="spec-grid" id="spec-grid"></div>
+      <div id="epc-zone" style="display:none;margin-top:14px;padding:12px 14px;border-radius:10px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.03)">
+        <div style="font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:#4a6a9a;margin-bottom:8px">Energy Performance Class</div>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <div id="epc-badge" style="font-size:28px;font-weight:800;width:46px;height:46px;border-radius:10px;display:flex;align-items:center;justify-content:center"></div>
+          <div>
+            <div id="epc-label" style="font-size:14px;font-weight:600;color:#e0e6f0"></div>
+            <div id="epc-score" style="font-size:12px;color:#6a8ab0;margin-top:2px"></div>
+          </div>
+        </div>
+        <div id="epc-tips" style="margin-top:10px;font-size:12px;color:#6a8ab0;line-height:1.5"></div>
+      </div>
     </div>
 
     <!-- Report -->
@@ -561,6 +572,34 @@ function renderResults(data) {
 
   show('results-zone');
   build3DModel(spec);
+
+  // Async energy class — fires after results are visible so it never blocks the UI.
+  // The /energy-class endpoint is rule-based (no AI call), so it's fast and free.
+  document.getElementById('epc-zone').style.display = 'none';
+  fetch('/energy-class', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(spec),
+  })
+    .then(r => r.json())
+    .then(epc => {
+      if (!epc || epc.error) return;
+      const EPC_COLORS = { 'A++': '#00c853', 'A+': '#00c853', A: '#4caf50', B: '#8bc34a', C: '#cddc39', D: '#ffeb3b', E: '#ff9800', F: '#ff5722', G: '#f44336' };
+      const color = EPC_COLORS[epc.class] || '#6a8ab0';
+      const badge  = document.getElementById('epc-badge');
+      const label  = document.getElementById('epc-label');
+      const score  = document.getElementById('epc-score');
+      const tips   = document.getElementById('epc-tips');
+      badge.textContent  = epc.class;
+      badge.style.cssText += `;background:${color}22;color:${color};border:2px solid ${color}55;`;
+      label.textContent  = epc.label || '';
+      score.textContent  = `Score: ${epc.score}/100`;
+      if (epc.tips && epc.tips.length) {
+        tips.innerHTML = '<strong style="color:#8aa0c0">Tips:</strong> ' + epc.tips.slice(0, 2).join(' · ');
+      }
+      document.getElementById('epc-zone').style.display = 'block';
+    })
+    .catch(() => {}); // silently ignore — EPC is supplementary info
 }
 
 function parseReport(text) {
