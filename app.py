@@ -19,7 +19,7 @@ from PIL import Image
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024  # 20MB max upload
-CORS(app, resources={r"/api/*": {"origins": "*"}, r"/energy-class": {"origins": "*"}, r"/health": {"origins": "*"}, r"/models": {"origins": "*"}})
+CORS(app, resources={r"/api/*": {"origins": "*"}, r"/energy-class": {"origins": "*"}, r"/health": {"origins": "*"}, r"/models": {"origins": "*"}, r"/accessibility": {"origins": "*"}})
 
 # ── Config ────────────────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -981,6 +981,152 @@ def material_estimator():
             "Quantities are indicative early-stage estimates only. "
             "Commission a quantity surveyor for tender-grade BOQ."
         ),
+    })
+
+
+# ── Accessibility Assessment ──────────────────────────────────────────────────
+
+ACCESSIBILITY_PROMPT = """
+You are an accessibility consultant and architect specialising in ADA (Americans with Disabilities Act), WCAG spatial equivalents, and universal design principles.
+
+Carefully examine the building image provided and assess it for physical accessibility.
+
+STEP 1 — Output a JSON block (between ```json and ```) with your accessibility assessment:
+
+```json
+{
+  "overall_score": 65,
+  "wheelchair_access": "partial",
+  "step_free_entrance": false,
+  "visible_ramp": true,
+  "parking_accessible": "unknown",
+  "elevator_likely": true,
+  "tactile_paving": false,
+  "wide_doorways_likely": true,
+  "accessible_signage": false,
+  "barriers": ["steps at main entrance", "narrow side path"],
+  "positives": ["ramp visible on north side", "flush threshold at service entrance"],
+  "assessment_confidence": 55
+}
+```
+
+Field rules:
+- "overall_score": 0–100 universal design score based on visible features
+- "wheelchair_access": "full", "partial", "likely_limited", or "unknown"
+- "step_free_entrance": true only if you can confirm no steps at the main entrance
+- "visible_ramp": true if a ramp or sloped approach is clearly visible
+- "parking_accessible": "yes", "no", or "unknown" — only "yes" if accessible bays are visible
+- "elevator_likely": true for multi-storey buildings; false for single-storey without lift
+- "tactile_paving": true if yellow/textured tactile guide strips are visible
+- "wide_doorways_likely": true if entrances appear ≥ 900mm wide based on proportions
+- "accessible_signage": true only if high-contrast or Braille signage is clearly visible
+- "barriers": list up to 5 specific physical barriers you can observe
+- "positives": list up to 5 positive accessibility features you can observe
+- "assessment_confidence": 0–100 — lower for distant/occluded/partial views
+
+STEP 2 — Write a concise accessibility report:
+
+## Accessibility Overview
+## Entrance & Approach
+## Vertical Circulation
+## Key Barriers
+## Recommendations
+## Accessibility Rating: X/10 — brief justification.
+
+Be specific to what you actually see. Do not invent features not visible in the image.
+"""
+
+
+@app.route("/accessibility", methods=["POST"])
+def accessibility():
+    """Assess a building image for universal design and ADA-style accessibility.
+
+    2026 AI UX trend: "transparent AI" means surfacing concrete, actionable
+    insight — not just aesthetics. Accessibility scoring fills a genuine gap in
+    architectural AI tools: most analyse style and structure but ignore whether
+    the building is physically usable by everyone.
+
+    Accepts: multipart/form-data with field 'image' (JPEG/PNG/WEBP).
+    Returns: JSON with structured accessibility metrics + a written report.
+    """
+    if "image" not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
+
+    file = request.files["image"]
+    if not file.filename:
+        return jsonify({"error": "Empty filename"}), 400
+
+    try:
+        file_bytes = file.read()
+        b64, mime = image_to_base64(file_bytes, file.filename)
+        image_data_url = f"data:{mime};base64,{b64}"
+    except Exception as e:
+        return jsonify({"error": f"Image processing failed: {str(e)}"}), 400
+
+    if not API_KEY:
+        return jsonify({"error": "No API key configured"}), 500
+
+    try:
+        client = Groq(api_key=API_KEY)
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_data_url}},
+                    {"type": "text",      "text": ACCESSIBILITY_PROMPT},
+                ],
+            }],
+            max_tokens=1500,
+            temperature=0.2,
+        )
+        raw_text = response.choices[0].message.content or ""
+    except Exception as e:
+        return jsonify({"error": f"AI request failed: {str(e)}"}), 502
+
+    metrics = {}
+    match = re.search(r"```json\s*(.*?)```", raw_text, re.DOTALL)
+    if match:
+        metrics = try_parse_json(match.group(1))
+
+    # Normalise key fields
+    score = metrics.get("overall_score")
+    try:
+        score = max(0, min(100, int(score)))
+    except (TypeError, ValueError):
+        score = 50
+    metrics["overall_score"] = score
+
+    wheelchair = metrics.get("wheelchair_access", "unknown")
+    if wheelchair not in ("full", "partial", "likely_limited", "unknown"):
+        metrics["wheelchair_access"] = "unknown"
+
+    for bool_field in ("step_free_entrance", "visible_ramp", "elevator_likely",
+                       "tactile_paving", "wide_doorways_likely", "accessible_signage"):
+        metrics[bool_field] = bool(metrics.get(bool_field, False))
+
+    for list_field in ("barriers", "positives"):
+        if not isinstance(metrics.get(list_field), list):
+            metrics[list_field] = []
+
+    confidence = metrics.get("assessment_confidence")
+    try:
+        metrics["assessment_confidence"] = max(0, min(100, int(confidence)))
+    except (TypeError, ValueError):
+        metrics["assessment_confidence"] = 50
+
+    # Extract report text
+    report = ""
+    report_match = re.search(r"```.*?```\s*(.*)", raw_text, re.DOTALL)
+    if report_match:
+        report = report_match.group(1).strip()
+    elif "## Accessibility Overview" in raw_text:
+        report = raw_text[raw_text.index("## Accessibility Overview"):].strip()
+
+    return jsonify({
+        "metrics": metrics,
+        "report": report,
+        "model": MODEL,
     })
 
 
