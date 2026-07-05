@@ -510,8 +510,32 @@ def compare():
         for pat in [r"```json-a.*?```", r"```json-b.*?```"]:
             report = re.sub(pat, "", report, flags=re.DOTALL).strip()
 
+        # Build a numeric comparison table so the frontend can show
+        # side-by-side deltas without parsing the prose report.
+        numeric_keys = ["height", "width", "depth", "floors", "floor_height",
+                        "window_cols", "window_rows", "podium_floors", "setbacks",
+                        "extraction_confidence"]
+        comparison_table = []
+        for key in numeric_keys:
+            va = spec_a.get(key)
+            vb = spec_b.get(key)
+            if va is None and vb is None:
+                continue
+            delta = None
+            if isinstance(va, (int, float)) and isinstance(vb, (int, float)):
+                delta = round(vb - va, 2)
+            comparison_table.append({
+                "metric": key.replace("_", " ").title(),
+                "a": va,
+                "b": vb,
+                "delta": delta,
+                "winner": "A" if (delta is not None and delta < 0) else
+                          "B" if (delta is not None and delta > 0) else "tie",
+            })
+
         return jsonify({
             "spec_a": spec_a, "spec_b": spec_b,
+            "comparison_table": comparison_table,
             "report": report,
             "image_a": f"data:{mime_a};base64,{b64_a}",
             "image_b": f"data:{mime_b};base64,{b64_b}",
