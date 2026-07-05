@@ -510,32 +510,8 @@ def compare():
         for pat in [r"```json-a.*?```", r"```json-b.*?```"]:
             report = re.sub(pat, "", report, flags=re.DOTALL).strip()
 
-        # Build a numeric comparison table so the frontend can show
-        # side-by-side deltas without parsing the prose report.
-        numeric_keys = ["height", "width", "depth", "floors", "floor_height",
-                        "window_cols", "window_rows", "podium_floors", "setbacks",
-                        "extraction_confidence"]
-        comparison_table = []
-        for key in numeric_keys:
-            va = spec_a.get(key)
-            vb = spec_b.get(key)
-            if va is None and vb is None:
-                continue
-            delta = None
-            if isinstance(va, (int, float)) and isinstance(vb, (int, float)):
-                delta = round(vb - va, 2)
-            comparison_table.append({
-                "metric": key.replace("_", " ").title(),
-                "a": va,
-                "b": vb,
-                "delta": delta,
-                "winner": "A" if (delta is not None and delta < 0) else
-                          "B" if (delta is not None and delta > 0) else "tie",
-            })
-
         return jsonify({
             "spec_a": spec_a, "spec_b": spec_b,
-            "comparison_table": comparison_table,
             "report": report,
             "image_a": f"data:{mime_a};base64,{b64_a}",
             "image_b": f"data:{mime_b};base64,{b64_b}",
@@ -1151,6 +1127,158 @@ def accessibility():
         "metrics": metrics,
         "report": report,
         "model": MODEL,
+    })
+
+
+@app.route("/seismic-risk", methods=["POST"])
+def seismic_risk():
+    """Deterministic seismic vulnerability estimate from a building spec.
+
+    Accepts the same JSON spec returned by /analyze and computes approximate
+    seismic base shear and vulnerability rating using simplified IS:1893 /
+    ASCE 7 methodology. Pure arithmetic — no AI cost.
+
+    2026 context: India's National Building Code Part 6 (Rev. 2026) and ASCE
+    7-22 both require seismic documentation earlier in the design process.
+    Integrating a quick seismic feasibility check alongside wind and shadow
+    analysis gives architects a complete structural triage at the sketch stage.
+
+    Request body: { ...spec, latitude: 28.6, wind_speed_ms: 33 }
+    latitude used to infer IS:1893 seismic zone (default: Delhi-NCR, Zone IV).
+    """
+    import math
+
+    body = request.get_json(silent=True) or {}
+    height   = max(1.0,  min(600.0, float(body.get("height",   30))))
+    width    = max(1.0,  min(500.0, float(body.get("width",    35))))
+    depth    = max(1.0,  min(500.0, float(body.get("depth",    28))))
+    floors   = max(1,    int(body.get("floors",   8)))
+    material = str(body.get("facade_material", "concrete")).lower()
+    has_podium  = bool(body.get("has_podium",  False))
+    setbacks    = max(0, int(body.get("setbacks",  0)))
+    lat_deg  = float(body.get("latitude", 28.6))
+
+    # ── IS:1893 Seismic Zone ──────────────────────────────────────────
+    # Proxy: latitude ranges covering major Indian seismic zones.
+    # Zone V (Z=0.36): Himalayas, Andaman; Zone IV (Z=0.24): Delhi, Punjab;
+    # Zone III (Z=0.16): Mumbai, Kolkata; Zone II (Z=0.10): South Deccan.
+    if lat_deg >= 31 or lat_deg <= 10:
+        zone, Z = "V",   0.36
+    elif 28 <= lat_deg < 31 or (22 <= lat_deg < 28 and abs(lat_deg - 26) < 2):
+        zone, Z = "IV",  0.24
+    elif 18 <= lat_deg < 28:
+        zone, Z = "III", 0.16
+    else:
+        zone, Z = "II",  0.10
+
+    # ── Response Reduction Factor R (IS:1893 Table 9) ─────────────────
+    # Higher R = more ductile = lower design force requirement.
+    r_map = {
+        "concrete": 5.0,  # ductile RC frame
+        "glass":    4.5,  # steel moment frame / curtain wall
+        "mixed":    4.0,
+        "brick":    3.0,  # ordinary unreinforced masonry
+        "stone":    2.5,  # stone masonry — least ductile
+    }
+    R = r_map.get(material, 4.0)
+
+    # ── Importance Factor I ───────────────────────────────────────────
+    I = 1.2  # commercial/office (residential=1.0, essential=1.5)
+
+    # ── Approximate Fundamental Period T (IS:1893 Cl. 7.6.1) ─────────
+    # T = 0.075 × H^0.75  (RC frame);  T = 0.085 × H^0.75  (steel)
+    ct = 0.085 if material in ("glass",) else 0.075
+    T = round(ct * (height ** 0.75), 3)
+
+    # ── Spectral Acceleration Sa/g (IS:1893 Fig. 2, medium soil) ──────
+    if T <= 0.1:
+        Sa_g = 2.5
+    elif T <= 0.55:
+        Sa_g = 2.5
+    elif T <= 4.0:
+        Sa_g = round(1.36 / T, 4)
+    else:
+        Sa_g = 0.34
+
+    # ── Seismic Base Shear Coefficient Ah ────────────────────────────
+    Ah = round((Z / 2) * (I / R) * Sa_g, 5)
+
+    # ── Seismic Weight W (simplified: 12 kN/m² per floor) ────────────
+    floor_area = width * depth
+    W_kN = round(floor_area * floors * 12.0, 1)
+    Vb_kN = round(Ah * W_kN, 1)
+
+    # ── Slenderness Ratio ─────────────────────────────────────────────
+    min_plan = min(width, depth)
+    slenderness = round(height / max(min_plan, 1), 2)
+
+    # ── Vulnerability Score (0-100; higher = safer) ───────────────────
+    score = 75  # baseline for a typical concrete mid-rise
+
+    # Material ductility
+    mat_adj = {"concrete": 0, "glass": -3, "mixed": -8, "brick": -22, "stone": -28}
+    score += mat_adj.get(material, 0)
+
+    # Height penalty (taller = more seismic demand, harder to control drift)
+    if height > 100: score -= 20
+    elif height > 60: score -= 12
+    elif height > 30: score -= 6
+
+    # Slenderness (H/B): slender towers prone to higher base moment and P-delta
+    if slenderness > 5:  score -= 18
+    elif slenderness > 3: score -= 9
+
+    # Podium: creates soft-story discontinuity — weak story failure mechanism
+    if has_podium: score -= 12
+
+    # Setbacks reduce plan irregularity and torsional eccentricity
+    score += min(12, setbacks * 4)
+
+    # Zone penalty — higher zone = higher spectral demand
+    zone_adj = {"V": -15, "IV": -8, "III": 0, "II": 8}
+    score += zone_adj.get(zone, 0)
+
+    score = max(0, min(100, score))
+
+    if   score >= 75: risk_level = "low";       risk_label = "Low — structure likely to meet IS:1893 code requirements with standard detailing."
+    elif score >= 55: risk_level = "moderate";  risk_label = "Moderate — some vulnerabilities; seismic detailing (IS:13920) review recommended."
+    elif score >= 35: risk_level = "high";      risk_label = "High — significant vulnerabilities; structural engineering review and capacity design required."
+    else:             risk_level = "very_high"; risk_label = "Very High — critical vulnerabilities; retrofit assessment or redesign essential before proceeding."
+
+    recommendations: list[str] = []
+    if material in ("brick", "stone"):
+        recommendations.append("Unreinforced masonry is highly seismically vulnerable — add RC jacketing, tie columns, or replace with confined masonry.")
+    if has_podium:
+        recommendations.append("Podium creates a soft-story mechanism at the transition level — ensure podium columns are stronger than upper-floor columns (capacity design principle).")
+    if slenderness > 3:
+        recommendations.append(f"Slender building (H/B ≈ {slenderness}) — check lateral drift (serviceability limit H/250) and P-delta amplification under seismic load.")
+    if height > 60:
+        recommendations.append("High-rise requires performance-based seismic design (PBSD) per IS:1893 Part 1 Cl. 12 — linear static analysis alone is insufficient.")
+    if zone in ("IV", "V") and material != "concrete":
+        recommendations.append(f"Zone {zone} (Z={Z}) with non-concrete structure — consider switching to ductile RC frame or steel braced frame to achieve R≥5.")
+    if not recommendations:
+        recommendations.append("No critical geometric vulnerabilities detected — verify reinforcement detailing meets IS:13920 ductile detailing requirements.")
+
+    return jsonify({
+        "seismic_zone":               zone,
+        "zone_factor_Z":              Z,
+        "importance_factor_I":        I,
+        "response_reduction_R":       R,
+        "fundamental_period_sec":     T,
+        "spectral_acceleration_Sa_g": Sa_g,
+        "base_shear_coefficient_Ah":  Ah,
+        "seismic_weight_kN":          W_kN,
+        "seismic_base_shear_kN":      Vb_kN,
+        "slenderness_ratio":          slenderness,
+        "vulnerability_score":        score,
+        "risk_level":                 risk_level,
+        "risk_label":                 risk_label,
+        "recommendations":            recommendations,
+        "note": (
+            "Simplified IS:1893 / ASCE 7 seismic estimate for early-stage feasibility only. "
+            "Site-specific soil classification (Type I/II/III), dynamic analysis, and ductile "
+            "detailing per IS:13920 are mandatory for regulatory submission."
+        ),
     })
 
 
