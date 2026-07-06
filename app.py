@@ -1282,6 +1282,141 @@ def seismic_risk():
     })
 
 
+@app.route("/acoustic-assessment", methods=["POST"])
+def acoustic_assessment():
+    """Rule-based acoustic performance estimate from a building spec.
+
+    Computes approximate Sound Transmission Class (STC) and Outdoor-Indoor
+    Transmission Class (OITC) ratings from the facade spec returned by /analyze.
+    Higher STC/OITC = better noise insulation. No AI cost — pure rule-based
+    calculation using industry standard values per ISO 16717 / ASTM E413.
+
+    2026 green-building trend: acoustic comfort is now a mandatory criterion in
+    WELL Building Standard v2, LEED v5 (pilot), and India's NBC Part 8 (2026 Rev.).
+    Integrating an acoustic estimate into the design-stage analysis flow prevents
+    costly post-occupancy remediation — a pattern rapidly adopted by arch-tech
+    platforms in 2026.
+
+    Request body: same spec dict as returned by /analyze
+    Returns: { stc, oitc, rating, barriers, recommendations, note }
+    """
+    spec = request.get_json(silent=True) or {}
+
+    material  = str(spec.get("facade_material", "concrete")).lower()
+    window_cols = int(spec.get("window_cols", 5))
+    window_rows = int(spec.get("window_rows", 10))
+    floors      = max(1, int(spec.get("floors", 10)))
+    height      = float(spec.get("height", 40))
+    has_balconies = bool(spec.get("has_balconies", False))
+    roof         = str(spec.get("roof", "flat")).lower()
+
+    # ── Base STC by primary facade material ────────────────────────────────
+    # Values based on ASTM E413 typical assemblies (single-pane glass ~27,
+    # double-pane ~35, concrete wall 200mm ~50, brick 220mm ~52).
+    stc_base = {
+        "glass":    32,   # curtain wall — single pane assumption; double = +6
+        "concrete": 50,   # 200mm RC wall
+        "brick":    52,   # 220mm clay brick
+        "stone":    54,   # 200mm stone masonry — dense, excellent mass
+        "mixed":    42,   # average of glass and masonry components
+    }.get(material, 44)
+
+    # ── Glazing ratio penalty ────────────────────────────────────────────────
+    # Window area as fraction of total facade.
+    # High glazing → facade STC approaches glazing STC (weak link).
+    facade_area   = 2 * (float(spec.get("width", 35)) + float(spec.get("depth", 28))) * height
+    window_area   = min(window_cols * window_rows * 1.5 * 1.8, facade_area * 0.85)
+    glazing_ratio = window_area / max(facade_area, 1.0)
+
+    # Weighted STC: glazing pulls composite down toward glass STC (32)
+    stc_composite = stc_base * (1 - glazing_ratio) + 32 * glazing_ratio
+    stc_composite = round(stc_composite)
+
+    # ── OITC (better for low-frequency traffic noise than STC) ──────────────
+    # OITC is typically 3–7 points below STC for masonry; similar for glass.
+    oitc = max(20, stc_composite - 5)
+
+    # ── Adjustments ─────────────────────────────────────────────────────────
+    adjustments: list[tuple[str, int]] = []
+
+    if glazing_ratio > 0.5:
+        adj = -round((glazing_ratio - 0.5) * 20)
+        adjustments.append((f"High glazing ratio ({glazing_ratio:.0%}) reduces facade STC significantly", adj))
+        stc_composite += adj; oitc += adj
+
+    if has_balconies:
+        adjustments.append(("Balconies create flanking paths around the primary facade", -3))
+        stc_composite -= 3; oitc -= 3
+
+    if roof == "flat":
+        adjustments.append(("Flat roof with no parapet reduces high-frequency attenuation on upper floors", -2))
+        stc_composite -= 2
+
+    if height > 60:
+        adjustments.append(("High-rise: upper floors exposed to unobstructed wind noise and aircraft noise", -2))
+        stc_composite -= 2; oitc -= 2
+
+    stc_composite = max(20, min(65, stc_composite))
+    oitc          = max(15, min(60, oitc))
+
+    # ── Rating ───────────────────────────────────────────────────────────────
+    if stc_composite >= 55:
+        rating, label = "Excellent", "Minimal intrusion from most external noise sources."
+    elif stc_composite >= 50:
+        rating, label = "Good",      "Suitable for residential/office in moderate urban noise."
+    elif stc_composite >= 45:
+        rating, label = "Adequate",  "Acceptable for offices near medium-traffic roads."
+    elif stc_composite >= 38:
+        rating, label = "Fair",      "Speech intelligible through facade; significant urban noise intrusion."
+    else:
+        rating, label = "Poor",      "Loud speech and traffic noise clearly audible indoors."
+
+    # ── Barriers / recommendations ───────────────────────────────────────────
+    barriers: list[str] = []
+    recommendations: list[str] = []
+
+    if material == "glass":
+        barriers.append("All-glass curtain wall has inherently low mass — primary acoustic weakness.")
+        recommendations.append("Specify double-glazed units (6/12/6mm) to raise facade STC from ~32 to ~38; triple-glazing (STC ~43) for high-noise zones.")
+
+    if glazing_ratio > 0.4:
+        barriers.append(f"Window-to-wall ratio {glazing_ratio:.0%} means glass dominates the composite STC.")
+        recommendations.append("Reduce WWR below 40% or upgrade to laminated acoustic glazing (STC 45+ achievable with 6.4mm PVB laminate).")
+
+    if has_balconies:
+        barriers.append("Balcony slabs create airborne sound flanking paths around the primary wall.")
+        recommendations.append("Install acoustic balustrades (min. 1.2m high, 10kg/m²) to interrupt the flanking path.")
+
+    if oitc < 35:
+        barriers.append(f"OITC {oitc} — low-frequency traffic and aircraft noise will be audible indoors.")
+        recommendations.append("Add viscoelastic damping strips between glazing and mullion frame to improve low-frequency performance by 3–5 dB.")
+
+    if not barriers:
+        barriers.append("No critical acoustic barriers detected for this facade typology.")
+    if not recommendations:
+        recommendations.append("Facade appears acoustically reasonable for its typology — focus on party-wall and floor/ceiling assemblies.")
+
+    return jsonify({
+        "stc":          stc_composite,
+        "oitc":         oitc,
+        "rating":       rating,
+        "rating_label": label,
+        "glazing_ratio_pct": round(glazing_ratio * 100, 1),
+        "adjustments":  [{"description": d, "delta_stc": v} for d, v in adjustments],
+        "barriers":     barriers,
+        "recommendations": recommendations,
+        "standards": {
+            "stc_reference": "ASTM E413 — Sound Transmission Class (higher = quieter indoors)",
+            "oitc_reference": "ASTM E1332 — Outdoor-Indoor Transmission Class (better for traffic/aircraft noise)",
+            "well_minimum":   "WELL Building Standard v2 Feature 72 requires STC ≥ 45 for exterior walls in occupied spaces",
+        },
+        "note": (
+            "Indicative estimate based on facade spec only. "
+            "Commission an acoustic engineer with site-specific noise measurements for WELL/LEED compliance."
+        ),
+    })
+
+
 if __name__ == "__main__":
     port = 5000
 
