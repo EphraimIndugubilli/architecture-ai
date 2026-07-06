@@ -490,13 +490,42 @@ function animateSteps() {
 }
 function stopSteps() { clearInterval(stepTimer); }
 
+// ── Client-side image resize ───────────────────────────────────────────────
+// Cap the upload at 1024×1024 px so large photos (up to the 20 MB limit)
+// compress to a small JPEG before hitting the network. This dramatically
+// reduces upload time on mobile / slow connections and prevents proxy timeouts
+// while preserving enough detail for the LLM's architectural analysis.
+function resizeImageForUpload(file, maxPx = 1024) {
+  return new Promise(resolve => {
+    const img = new Image();
+    const blobUrl = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(blobUrl);
+      const { naturalWidth: w, naturalHeight: h } = img;
+      if (w <= maxPx && h <= maxPx) { resolve(file); return; }
+      const scale  = Math.min(maxPx / w, maxPx / h);
+      const canvas = document.createElement('canvas');
+      canvas.width  = Math.round(w * scale);
+      canvas.height = Math.round(h * scale);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob(
+        blob => resolve(new File([blob], file.name, { type: 'image/jpeg' })),
+        'image/jpeg', 0.88
+      );
+    };
+    img.onerror = () => { URL.revokeObjectURL(blobUrl); resolve(file); };
+    img.src = blobUrl;
+  });
+}
+
 // ── Upload & analyze ───────────────────────────────────────────────────────
 async function uploadFile(file) {
   show('loading-zone');
   animateSteps();
 
+  const compressed = await resizeImageForUpload(file);
   const form = new FormData();
-  form.append('image', file);
+  form.append('image', compressed);
 
   try {
     const res  = await fetch('/analyze', { method: 'POST', body: form });
