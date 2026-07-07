@@ -1417,6 +1417,154 @@ def acoustic_assessment():
     })
 
 
+@app.route("/daylight-analysis", methods=["POST"])
+def daylight_analysis():
+    """Compute daylight performance metrics for a building facade.
+
+    2026 sustainable design trend: daylight autonomy and climate-based
+    daylight modelling (CBDM) are now required inputs for WELL v2, LEED v4.1,
+    and BREEAM Excellent ratings. This endpoint estimates key metrics from
+    the extracted building spec so architects get an early-stage compliance
+    signal without running a full Radiance/EnergyPlus simulation.
+
+    Request JSON fields (all optional — sensible defaults applied):
+      width (m), depth (m), height (m), floors (int),
+      floor_height (m), window_cols (int), window_rows (int),
+      facade_material (str), has_balconies (bool),
+      latitude (float, default 40.7), orientation (deg clockwise from N, default 0)
+
+    Response includes: estimated WWR, daylight factor %, sun-hours by facade,
+    sDA/ASE approximations, and prioritised recommendations.
+    """
+    data = request.get_json(silent=True) or {}
+
+    width        = float(data.get("width", 30))
+    depth        = float(data.get("depth", 20))
+    height       = float(data.get("height", 30))
+    floors       = int(data.get("floors", 8))
+    floor_height = float(data.get("floor_height", height / max(floors, 1)))
+    window_cols  = int(data.get("window_cols", 6))
+    window_rows  = int(data.get("window_rows", floors))
+    material     = str(data.get("facade_material", "glass")).lower()
+    has_balconies = bool(data.get("has_balconies", False))
+    latitude     = float(data.get("latitude", 40.7))
+    orientation  = float(data.get("orientation", 0)) % 360  # deg CW from north
+
+    # ── Window-to-Wall Ratio (WWR) ────────────────────────────────────────────
+    # Estimate each window as 1.5m wide × 1.2m tall (standard curtain-wall module)
+    win_w, win_h = 1.5, 1.2
+    facade_area = width * height
+    glazed_area = min(window_cols * window_rows * win_w * win_h, facade_area)
+    wwr = round(glazed_area / max(facade_area, 1), 3)
+
+    # ── Visible Light Transmittance by material ───────────────────────────────
+    vlt_map = {"glass": 0.70, "concrete": 0.0, "brick": 0.0, "stone": 0.0, "mixed": 0.40}
+    vlt = vlt_map.get(material, 0.50)
+
+    # ── Daylight Factor estimate (CIE standard overcast sky, simplified CIBSE) ─
+    # DF% ≈ (WWR × VLT × 100) / (1 + 0.5 × depth/width) — accounts for room depth
+    room_depth_factor = 1 + 0.5 * min(depth / max(width, 1), 3.0)
+    df = round((wwr * vlt * 100) / room_depth_factor, 2)
+
+    # Balcony overhang penalty: each 1.2m balcony slab reduces DF ~15%
+    if has_balconies:
+        df = round(df * 0.85, 2)
+
+    # CIBSE/WELL DF thresholds
+    if df >= 5.0:
+        df_rating, df_label = "excellent", "Target exceeded — consider glare control"
+    elif df >= 2.0:
+        df_rating, df_label = "good", "WELL Daylight Concept compliant (≥2% DF in 75% of spaces)"
+    elif df >= 1.0:
+        df_rating, df_label = "adequate", "Marginal — add supplemental daylight strategies"
+    else:
+        df_rating, df_label = "poor", "Below acceptable minimum — redesign facade or add rooflights"
+
+    # ── Annual sun-hours by facade orientation ────────────────────────────────
+    # Simple solar geometry approximation for 4 cardinal facades:
+    #   South (lat < 60°): highest; North: lowest; E/W: symmetric mid-range.
+    # Scaled from published TMY data for mid-latitudes.
+    lat_rad = abs(latitude)
+    south_base = max(1200 - lat_rad * 12, 600)
+    north_base = max(400 - lat_rad * 4,  150)
+    ew_base    = max(900 - lat_rad * 8,  400)
+
+    # Rotate: which actual compass direction does each logical facade face?
+    # orientation=0 → primary facade faces south; +90 → faces west, etc.
+    angles = {
+        "primary":  (180 + orientation) % 360,
+        "rear":     orientation % 360,
+        "left":     (90  + orientation) % 360,
+        "right":    (270 + orientation) % 360,
+    }
+
+    def _sun_hours(bearing: float) -> int:
+        # 0=N, 90=E, 180=S, 270=W
+        if 135 <= bearing <= 225:
+            return round(south_base)
+        if bearing < 45 or bearing > 315:
+            return round(north_base)
+        return round(ew_base)
+
+    sun_hours = {face: _sun_hours(ang) for face, ang in angles.items()}
+
+    # ── sDA approximation (LEED v4.1 Daylight credit) ─────────────────────────
+    # sDA300/50% threshold: 300 lux for ≥50% of occupied hours in ≥55% of floor area.
+    # Approximate: sDA% ≈ (WWR_primary × VLT × 300) / 3 clamped to [0,100]
+    sda_raw = min((wwr * vlt * 300) / 3.0, 100)
+    # Depth penalty: open-plan rooms beyond 6m from window rarely reach 300 lux
+    depth_penalty = max(0, (depth - 6) * 2)
+    sda = round(max(0, sda_raw - depth_penalty), 1)
+    sda_compliant = sda >= 55
+
+    # ── ASE (Annual Sunlight Exposure) glare check ────────────────────────────
+    # ASE1000/250: % floor area receiving >1000 lux direct sun for >250 h/yr.
+    # High WWR + south/west facade → glare risk.
+    south_facing = 135 <= angles["primary"] <= 225 or 225 <= angles["primary"] <= 315
+    ase_risk = "high" if (wwr > 0.55 and south_facing) else "moderate" if wwr > 0.40 else "low"
+
+    # ── Recommendations ───────────────────────────────────────────────────────
+    recs = []
+    if df < 2.0:
+        recs.append("Increase WWR to 35–45% to achieve WELL Daylight Concept minimum 2% DF.")
+    if df > 5.0:
+        recs.append("Install external shading devices (brise-soleil or fins) to prevent glare while maintaining daylighting.")
+    if has_balconies and df < 3.0:
+        recs.append("Balcony overhangs are reducing daylight factor; consider perforated balustrades or reduce slab depth to 0.8m.")
+    if ase_risk == "high":
+        recs.append("ASE glare risk is high — specify electrochromic glazing or external louvers on south/west facades to limit direct sun penetration.")
+    if sda < 55:
+        recs.append(f"Estimated sDA {sda}% is below LEED v4.1 Option 1 target (55%). Consider light shelves or high-VLT glass (VLT ≥ 0.70).")
+    if depth > 12 and wwr < 0.40:
+        recs.append("Deep floor plate (>12m) with low WWR will leave central zones unlit — add interior clerestories or light wells.")
+    if not recs:
+        recs.append("Daylight performance appears adequate for this facade typology and orientation.")
+
+    return jsonify({
+        "window_to_wall_ratio":    wwr,
+        "glazed_area_m2":          round(glazed_area, 1),
+        "facade_area_m2":          round(facade_area, 1),
+        "daylight_factor_pct":     df,
+        "df_rating":               df_rating,
+        "df_label":                df_label,
+        "sda_55_300":              sda,
+        "sda_compliant":           sda_compliant,
+        "ase_risk":                ase_risk,
+        "sun_hours_by_facade":     sun_hours,
+        "primary_orientation_deg": round(angles["primary"], 1),
+        "recommendations":         recs,
+        "standards": {
+            "df_reference":  "CIBSE LG10 / WELL v2 Feature 57 — min 2% DF in 75% of primary spaces",
+            "sda_reference": "IES LM-83 sDA300/50% — LEED v4.1 EQ Daylight credit requires sDA ≥ 55%",
+            "ase_reference": "IES LM-83 ASE1000/250 — must be < 10% floor area for LEED credit",
+        },
+        "note": (
+            "Indicative metrics only. Run a full CBDM simulation (Radiance/EnergyPlus + Rhino/Grasshopper) "
+            "with local TMY weather data for WELL/LEED/BREEAM compliance documentation."
+        ),
+    })
+
+
 if __name__ == "__main__":
     port = 5000
 
