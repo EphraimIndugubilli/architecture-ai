@@ -332,6 +332,31 @@
       <div class="report-sections" id="report-sections"></div>
     </div>
 
+    <!-- Accessibility Assessment -->
+    <div class="report-card" id="accessibility-zone" style="display:none">
+      <h3>Accessibility Assessment</h3>
+      <div style="display:flex;align-items:flex-start;gap:20px;flex-wrap:wrap;margin-bottom:16px">
+        <div id="acc-score-ring" style="flex-shrink:0;width:76px;height:76px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-direction:column;border:3px solid #2563eb22;background:rgba(37,99,235,0.07)">
+          <div id="acc-score-num" style="font-size:22px;font-weight:800;color:#3b82f6"></div>
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:#4a6a9a">/ 100</div>
+        </div>
+        <div style="flex:1;min-width:200px">
+          <div style="font-size:12px;color:#4a6a9a;text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px">Wheelchair Access</div>
+          <div id="acc-wheelchair" style="font-size:14px;font-weight:600;margin-bottom:10px"></div>
+          <div id="acc-features" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+        </div>
+      </div>
+      <div id="acc-barriers-wrap" style="display:none;margin-bottom:12px">
+        <div style="font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:#dc2626;margin-bottom:6px">Barriers Identified</div>
+        <ul id="acc-barriers" style="margin:0;padding-left:16px;font-size:12px;color:#8aa0c0;line-height:1.8"></ul>
+      </div>
+      <div id="acc-positives-wrap" style="display:none;margin-bottom:12px">
+        <div style="font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:#16a34a;margin-bottom:6px">Positive Features</div>
+        <ul id="acc-positives" style="margin:0;padding-left:16px;font-size:12px;color:#8aa0c0;line-height:1.8"></ul>
+      </div>
+      <div id="acc-report" style="font-size:12.5px;line-height:1.7;color:#8aa0c0;border-top:1px solid rgba(255,255,255,0.06);padding-top:12px;margin-top:4px"></div>
+    </div>
+
   </div>
 </div>
 
@@ -629,6 +654,67 @@ function renderResults(data) {
       document.getElementById('epc-zone').style.display = 'block';
     })
     .catch(() => {}); // silently ignore — EPC is supplementary info
+
+  // Async accessibility — fires after results are visible.
+  // Converts the stored data-URL back to a Blob so the endpoint gets a real file.
+  document.getElementById('accessibility-zone').style.display = 'none';
+  if (data.image) {
+    try {
+      const [header, b64] = data.image.split(',');
+      const mime = header.match(/:(.*?);/)[1];
+      const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+      const blob  = new Blob([bytes], { type: mime });
+      const form  = new FormData();
+      form.append('image', blob, 'building.jpg');
+      fetch('/accessibility', { method: 'POST', body: form })
+        .then(r => r.json())
+        .then(acc => {
+          if (!acc || acc.error || !acc.metrics) return;
+          const m = acc.metrics;
+          const scoreEl = document.getElementById('acc-score-num');
+          const ring    = document.getElementById('acc-score-ring');
+          scoreEl.textContent = m.overall_score;
+          const scoreColor = m.overall_score >= 70 ? '#22c55e' : m.overall_score >= 45 ? '#f59e0b' : '#ef4444';
+          ring.style.borderColor = scoreColor + '55';
+          ring.style.background  = scoreColor + '11';
+          scoreEl.style.color    = scoreColor;
+
+          const wcColors = { full: '#22c55e', partial: '#f59e0b', likely_limited: '#ef4444', unknown: '#6a8ab0' };
+          const wcLabels = { full: 'Full wheelchair access', partial: 'Partial access', likely_limited: 'Limited — barriers likely', unknown: 'Unknown from image' };
+          const wcEl = document.getElementById('acc-wheelchair');
+          wcEl.textContent  = wcLabels[m.wheelchair_access] || m.wheelchair_access;
+          wcEl.style.color  = wcColors[m.wheelchair_access] || '#6a8ab0';
+
+          const features = [
+            { key: 'step_free_entrance',   label: 'Step-free entrance' },
+            { key: 'visible_ramp',         label: 'Visible ramp' },
+            { key: 'elevator_likely',      label: 'Elevator' },
+            { key: 'tactile_paving',       label: 'Tactile paving' },
+            { key: 'wide_doorways_likely', label: 'Wide doorways' },
+            { key: 'accessible_signage',   label: 'Accessible signage' },
+          ];
+          const featWrap = document.getElementById('acc-features');
+          featWrap.innerHTML = features.map(f => {
+            const present = m[f.key];
+            return `<span style="font-size:11px;padding:3px 9px;border-radius:20px;border:1px solid ${present ? '#22c55e44' : '#ef444433'};background:${present ? '#22c55e0d' : '#ef44440d'};color:${present ? '#86efac' : '#fca5a5'}">${present ? '✓' : '✗'} ${f.label}</span>`;
+          }).join('');
+
+          if (m.barriers && m.barriers.length) {
+            document.getElementById('acc-barriers').innerHTML = m.barriers.map(b => `<li>${b}</li>`).join('');
+            document.getElementById('acc-barriers-wrap').style.display = 'block';
+          }
+          if (m.positives && m.positives.length) {
+            document.getElementById('acc-positives').innerHTML = m.positives.map(p => `<li>${p}</li>`).join('');
+            document.getElementById('acc-positives-wrap').style.display = 'block';
+          }
+          if (acc.report) {
+            document.getElementById('acc-report').textContent = acc.report;
+          }
+          document.getElementById('accessibility-zone').style.display = 'block';
+        })
+        .catch(() => {});
+    } catch(e) {} // silently ignore if image parsing fails
+  }
 }
 
 function parseReport(text) {
