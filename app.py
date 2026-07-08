@@ -31,6 +31,23 @@ except ImportError:
 
 MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
+# Per-request model selection — 2026 LLMOps pattern: callers can override the
+# model tier without a code change. Scout is the fast default; Maverick offers
+# higher reasoning capacity (128 experts vs 16) for complex multi-building
+# comparisons; llama-3.3-70b-versatile is the text-only fallback.
+AVAILABLE_MODELS = {
+    "meta-llama/llama-4-scout-17b-16e-instruct":     "Llama 4 Scout — fast, vision-capable (default)",
+    "meta-llama/llama-4-maverick-17b-128e-instruct": "Llama 4 Maverick — high-capacity, vision-capable",
+    "llama-3.3-70b-versatile":                       "Llama 3.3 70B — text-only fallback",
+}
+
+
+def resolve_model(requested: str | None) -> str:
+    """Return the requested model if it's in the allow-list, otherwise MODEL."""
+    if requested and requested in AVAILABLE_MODELS:
+        return requested
+    return MODEL
+
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
 PROMPT = """
@@ -221,11 +238,10 @@ def health():
 @app.route("/models")
 def models():
     return jsonify({
-        "current": MODEL,
+        "default": MODEL,
         "available": [
-            "meta-llama/llama-4-scout-17b-16e-instruct",
-            "meta-llama/llama-4-maverick-17b-128e-instruct",
-            "llama-3.3-70b-versatile",
+            {"id": mid, "description": desc}
+            for mid, desc in AVAILABLE_MODELS.items()
         ],
     })
 
@@ -249,10 +265,11 @@ def analyze():
     if not API_KEY:
         return jsonify({"error": "No API key configured in arch_config.py"}), 500
 
+    chosen_model = resolve_model(request.form.get("model"))
     try:
         client = Groq(api_key=API_KEY)
         response = client.chat.completions.create(
-            model=MODEL,
+            model=chosen_model,
             messages=[{
                 "role": "user",
                 "content": [
@@ -264,7 +281,7 @@ def analyze():
         )
         raw_text = response.choices[0].message.content
         spec, report = parse_response(raw_text)
-        return jsonify({"spec": spec, "report": report, "image": image_data_url})
+        return jsonify({"spec": spec, "report": report, "image": image_data_url, "model_used": chosen_model})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -289,13 +306,15 @@ def analyze_stream():
     if not API_KEY:
         return jsonify({"error": "No API key configured in arch_config.py"}), 500
 
+    chosen_model = resolve_model(request.form.get("model"))
+
     @stream_with_context
     def generate():
         full_text = []
         try:
             client = Groq(api_key=API_KEY)
             stream = client.chat.completions.create(
-                model=MODEL,
+                model=chosen_model,
                 messages=[{
                     "role": "user",
                     "content": [
@@ -314,7 +333,7 @@ def analyze_stream():
 
             raw_text = "".join(full_text)
             spec, report = parse_response(raw_text)
-            yield f"data: {json.dumps({'type': 'done', 'spec': spec, 'report': report, 'image': image_data_url})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'spec': spec, 'report': report, 'image': image_data_url, 'model_used': chosen_model})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 

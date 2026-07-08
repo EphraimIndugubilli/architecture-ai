@@ -258,6 +258,14 @@
     <p class="formats">JPG · PNG · WEBP — up to 20MB</p>
     <label class="btn" for="file-input">Choose Image</label>
     <input type="file" id="file-input" accept="image/*">
+    <div style="margin-top:1rem;display:flex;align-items:center;gap:.6rem;justify-content:center;flex-wrap:wrap;">
+      <label for="model-select" style="font-size:.75rem;color:var(--muted,#888);">AI Model:</label>
+      <select id="model-select" style="background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:.5rem;padding:.3rem .6rem;font-size:.75rem;color:inherit;cursor:pointer;">
+        <option value="meta-llama/llama-4-scout-17b-16e-instruct">Llama 4 Scout (fast)</option>
+        <option value="meta-llama/llama-4-maverick-17b-128e-instruct">Llama 4 Maverick (high-capacity)</option>
+        <option value="llama-3.3-70b-versatile">Llama 3.3 70B (text-only)</option>
+      </select>
+    </div>
     <div id="error-banner"></div>
   </div>
   <div class="history-panel" id="history-panel" style="display:none">
@@ -551,6 +559,8 @@ async function uploadFile(file) {
   const compressed = await resizeImageForUpload(file);
   const form = new FormData();
   form.append('image', compressed);
+  const modelSelect = document.getElementById('model-select');
+  if (modelSelect && modelSelect.value) form.append('model', modelSelect.value);
 
   try {
     const res  = await fetch('/analyze', { method: 'POST', body: form });
