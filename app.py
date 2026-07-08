@@ -1565,6 +1565,155 @@ def daylight_analysis():
     })
 
 
+@app.route("/occupant-load", methods=["POST"])
+def occupant_load():
+    """Estimate occupant load and fire egress requirements from a building spec.
+
+    Applies IBC (International Building Code) Section 1004 occupant load factors
+    and Section 1005 egress width rules to the spec returned by /analyze.
+    Pure arithmetic — no AI cost. Useful for early-stage code compliance checking
+    before a fire engineer is engaged.
+
+    2026 context: India's National Building Code Part 4 (Fire & Life Safety, Rev. 2026)
+    now mandates occupant load documentation at the design approval stage.
+    Integrating this check alongside energy, wind, and acoustic analysis gives
+    architects a complete multi-discipline triage at the sketch stage.
+
+    Request body: same spec dict returned by /analyze, plus optional:
+      use_type: "office" | "retail" | "residential" | "assembly" | "education"
+                (default: "office")
+
+    Returns: occupant load per floor, total, required exit width, staircase count,
+             and corridor width per NBC/IBC.
+    """
+    spec = request.get_json(silent=True) or {}
+
+    width    = float(spec.get("width",  35))
+    depth    = float(spec.get("depth",  28))
+    floors   = max(1, int(spec.get("floors", 14)))
+    has_podium   = bool(spec.get("has_podium", False))
+    podium_floors = max(0, int(spec.get("podium_floors", 0)))
+    use_type = str(spec.get("use_type", "office")).lower()
+
+    floor_area_m2 = width * depth
+
+    # ── IBC Table 1004.5 occupant load factors (gross m² per person) ─────────
+    # "Assembly" covers auditoriums, banquet halls (0.65 m²/person standing,
+    # 1.4 m²/person fixed seating). Using 1.4 as the conservative seated estimate.
+    load_factors = {
+        "office":      9.3,   # IBC: 9.3 m²/person for business occupancies
+        "retail":      2.8,   # IBC: 2.8 m²/person for mercantile (ground floor)
+        "residential": 18.6,  # IBC: 18.6 m²/person for residential
+        "assembly":    1.4,   # IBC: 1.4 m²/person for assembly with fixed seating
+        "education":   1.9,   # IBC: 1.9 m²/person for classrooms
+    }
+    load_factor = load_factors.get(use_type, 9.3)
+
+    occupants_per_floor = max(1, round(floor_area_m2 / load_factor))
+    total_occupants     = occupants_per_floor * floors
+
+    if has_podium and podium_floors > 0:
+        podium_area = floor_area_m2 * 1.3 * 1.3  # podium is wider
+        podium_occupants = max(1, round(podium_area / load_factor)) * podium_floors
+        total_occupants += podium_occupants
+    else:
+        podium_occupants = 0
+
+    # ── IBC Section 1005.1 egress width ──────────────────────────────────────
+    # For sprinklered buildings (assumed): 5 mm per occupant for stairways,
+    # 3.8 mm per occupant for level exits and corridors.
+    # For non-sprinklered: 7.6 mm per stairway, 5 mm per corridor.
+    # Assume sprinklered (common for buildings > 4 floors per NBC Part 4).
+    sprinklered = floors > 4
+    stair_width_per_person_mm  = 5.0 if sprinklered else 7.6
+    corridor_width_per_person_mm = 3.8 if sprinklered else 5.0
+
+    # Total required exit stair width (mm) — stairs must serve all occupants above grade
+    required_stair_width_mm    = round(occupants_per_floor * stair_width_per_person_mm)
+    required_corridor_width_mm = round(occupants_per_floor * corridor_width_per_person_mm)
+
+    # Minimum stair width per IBC: 1 118 mm (44 in) for > 50 occupants; 914 mm otherwise
+    min_stair_width_mm = 1118 if occupants_per_floor > 50 else 914
+
+    # Number of required staircases — each stair has a practical usable width of
+    # ~1 200 mm (one 44-in stair). Divide total required width by stair width.
+    stair_count = max(2, -(-required_stair_width_mm // min_stair_width_mm))  # ceiling division, minimum 2
+
+    # NBC Part 4 (2026) adds: minimum 2 exits for any floor > 50 occupants.
+    if occupants_per_floor > 50:
+        stair_count = max(2, stair_count)
+
+    # Travel distance limit (IBC Table 1017.2): office/education = 61 m sprinklered;
+    # retail/assembly = 76 m sprinklered.
+    travel_distance_limit_m = 76 if use_type in ("retail", "assembly") else 61
+
+    # Approximate max travel distance on this floor plate (diagonal of floor plan)
+    import math
+    diagonal_m = round(math.sqrt(width ** 2 + depth ** 2), 1)
+    travel_ok  = diagonal_m <= travel_distance_limit_m
+
+    # ── Emergency lighting / exit sign area (indicative) ─────────────────────
+    # NBC Part 4: one emergency luminaire per 250 m² of floor area (minimum 1 per floor)
+    emergency_lights_per_floor = max(1, math.ceil(floor_area_m2 / 250))
+
+    # ── Refuge area (NBC Part 4 for high-rise > 30 m) ────────────────────────
+    building_height = float(spec.get("height", 55))
+    needs_refuge_area = building_height > 30
+    refuge_area_m2_per_floor = round(0.3 * occupants_per_floor) if needs_refuge_area else 0
+
+    # ── Code compliance summary ───────────────────────────────────────────────
+    issues: list[str] = []
+    notes:  list[str] = []
+
+    if stair_count > 4:
+        issues.append(f"High staircase count ({stair_count}) suggests the floor plate is very densely loaded for {use_type} — consider splitting into smaller fire compartments.")
+    if not travel_ok:
+        issues.append(f"Floor diagonal {diagonal_m} m may exceed IBC travel distance limit of {travel_distance_limit_m} m for {use_type} — locate exit stairs at both ends of the floor plate.")
+    if use_type == "assembly" and floors > 1:
+        issues.append("Assembly occupancies on upper floors require additional exit discharge analysis — IBC Section 1028.")
+    if not sprinklered:
+        notes.append("Building assumed non-sprinklered (≤4 floors) — higher egress widths apply. Adding sprinklers can reduce required stair width by 33%.")
+    else:
+        notes.append("Sprinkler system assumed (>4 floors per NBC Part 4) — 5 mm/person stair width factor applied.")
+    if needs_refuge_area:
+        notes.append(f"Building > 30 m requires a refuge area of ~{refuge_area_m2_per_floor} m² per floor (NBC Part 4 Cl. 4.13).")
+    if not issues:
+        notes.append("No critical egress issues detected at this floor plate size and occupancy type.")
+
+    return jsonify({
+        "use_type":                   use_type,
+        "floor_area_m2":              round(floor_area_m2, 1),
+        "load_factor_m2_per_person":  load_factor,
+        "occupants_per_floor":        occupants_per_floor,
+        "occupied_floors":            floors,
+        "total_occupants":            total_occupants,
+        "podium_occupants":           podium_occupants,
+        "egress": {
+            "required_stair_width_mm":    required_stair_width_mm,
+            "required_corridor_width_mm": required_corridor_width_mm,
+            "min_single_stair_width_mm":  min_stair_width_mm,
+            "staircase_count_required":   stair_count,
+            "sprinklered_assumption":     sprinklered,
+        },
+        "travel_distance": {
+            "floor_diagonal_m":       diagonal_m,
+            "code_limit_m":           travel_distance_limit_m,
+            "within_limit":           travel_ok,
+        },
+        "emergency_lights_per_floor": emergency_lights_per_floor,
+        "refuge_area": {
+            "required":            needs_refuge_area,
+            "area_m2_per_floor":   refuge_area_m2_per_floor,
+        },
+        "compliance_issues": issues,
+        "notes": notes,
+        "note": (
+            "Indicative occupant load and egress estimate per IBC 2021 / NBC 2026 Part 4. "
+            "Commission a licensed fire engineer for building permit submission."
+        ),
+    })
+
+
 if __name__ == "__main__":
     port = 5000
 
