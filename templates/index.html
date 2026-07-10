@@ -277,7 +277,10 @@
 <!-- Loading -->
 <div id="loading-zone">
   <div class="loader"></div>
-  <div class="loading-text">Analyzing architecture...</div>
+  <div class="loading-text">Analyzing architecture… <span id="loading-pct" style="font-size:13px;color:#3b82f6;font-weight:600;">0%</span></div>
+  <div id="loading-progress-wrap" style="width:260px;height:4px;background:rgba(255,255,255,0.07);border-radius:9999px;overflow:hidden;margin:8px auto 0;">
+    <div id="loading-progress-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#3b82f6,#60a5fa);border-radius:9999px;transition:width 0.4s ease;"></div>
+  </div>
   <div class="loading-steps">
     <div class="step" id="step-1"><div class="step-dot"></div>Processing image</div>
     <div class="step" id="step-2"><div class="step-dot"></div>AI structural analysis</div>
@@ -510,18 +513,43 @@ function show(id) {
 
 function reset() { show('upload-zone'); fileInput.value = ''; currentData = null; }
 
-// ── Step animation ─────────────────────────────────────────────────────────
-let stepTimer = null;
+// ── Step + progress animation ──────────────────────────────────────────────
+let stepTimer = null, pctTimer = null;
 function animateSteps() {
   const steps = ['step-1','step-2','step-3','step-4'];
   let i = 0;
   steps.forEach(s => document.getElementById(s).className = 'step');
+
+  // Percentage counter: advances quickly to 85% then stalls waiting for the API.
+  // The milestones roughly match the step delays: 25% per step, slowing near 100%.
+  const pctEl  = document.getElementById('loading-pct');
+  const barEl  = document.getElementById('loading-progress-bar');
+  let pct = 0;
+  if (pctEl) pctEl.textContent = '0%';
+  if (barEl) barEl.style.width = '0%';
+  pctTimer = setInterval(() => {
+    // Fast ramp to 85 (≈ steps 1–4 active), then crawl to 95 while waiting for API
+    const target = pct < 25 ? 25 : pct < 50 ? 50 : pct < 75 ? 75 : pct < 85 ? 85 : 95;
+    const step = pct < 85 ? 2 : 0.3;
+    pct = Math.min(target, pct + step);
+    if (pctEl) pctEl.textContent = Math.round(pct) + '%';
+    if (barEl) barEl.style.width = pct + '%';
+  }, 120);
+
   stepTimer = setInterval(() => {
     if (i > 0) document.getElementById(steps[i-1]).className = 'step done';
     if (i < steps.length) { document.getElementById(steps[i]).className = 'step active'; i++; }
   }, 1200);
 }
-function stopSteps() { clearInterval(stepTimer); }
+function stopSteps() {
+  clearInterval(stepTimer);
+  clearInterval(pctTimer);
+  // Snap to 100% on success
+  const pctEl = document.getElementById('loading-pct');
+  const barEl = document.getElementById('loading-progress-bar');
+  if (pctEl) pctEl.textContent = '100%';
+  if (barEl) barEl.style.width = '100%';
+}
 
 // ── Client-side image resize ───────────────────────────────────────────────
 // Cap the upload at 1024×1024 px so large photos (up to the 20 MB limit)
