@@ -1733,6 +1733,158 @@ def occupant_load():
     })
 
 
+@app.route("/thermal-comfort", methods=["POST"])
+def thermal_comfort():
+    """Estimate ASHRAE 55 thermal comfort (PMV/PPD) from building spec + environment.
+
+    PMV (Predicted Mean Vote) measures thermal sensation on a −3 (Cold) to +3 (Hot)
+    scale; PPD (Predicted Percentage Dissatisfied) converts it to a dissatisfaction
+    rate. ASHRAE 55-2020 targets PMV within ±0.5 (PPD < 10%) for compliant spaces.
+
+    2026 context: WELL Building Standard v2 Feature 54 and LEED v5 (pilot) now require
+    PMV/PPD documentation at the design stage — making this calculation a standard
+    step in the architectural analysis workflow alongside energy, daylight, and acoustic
+    assessments. This endpoint uses the Fanger steady-state model (ISO 7730:2005).
+
+    Request body (JSON) — all fields optional, sensible defaults for a typical office:
+      air_temp_c (float, default 22): indoor air temperature (°C)
+      mean_radiant_temp_c (float): mean radiant temperature; defaults to air_temp_c
+                                   adjusted for facade material's solar gain tendency
+      air_velocity_ms (float, default 0.1): mean air velocity (m/s)
+      relative_humidity_pct (float, default 50): relative humidity (%)
+      metabolic_rate (float, default 1.2): met units (1.0=seated/still, 1.2=office work,
+                                            2.0=walking, 3.0=fast walk)
+      clothing_insulation (float, default 0.7): clo units (0.5=light summer, 0.7=office,
+                                                  1.0=business suit, 1.5=heavy winter)
+      facade_material (str): from building spec — used to adjust MRT estimate when
+                              mean_radiant_temp_c is not explicitly provided
+
+    Returns: PMV, PPD, sensation label, ASHRAE 55 compliance, operative temperature,
+             and tailored recommendations.
+    """
+    import math
+
+    data = request.get_json(silent=True) or {}
+
+    # Environmental inputs
+    ta  = float(data.get("air_temp_c",          22))
+    va  = max(0.0, float(data.get("air_velocity_ms",      0.1)))
+    rh  = max(0.0, min(100.0, float(data.get("relative_humidity_pct", 50))))
+    met = max(0.7, float(data.get("metabolic_rate",       1.2)))
+    clo = max(0.0, float(data.get("clothing_insulation",  0.7)))
+
+    # Mean radiant temperature: default to air_temp_c adjusted by facade solar gain.
+    # Glass facades absorb more solar radiation and re-radiate it as longwave heat —
+    # adding 2–4 °C above air temperature on a sunny day is a standard rule of thumb.
+    material = str(data.get("facade_material", "glass")).lower()
+    mrt_offsets = {"glass": 3.0, "concrete": 1.0, "mixed": 1.5, "brick": 0.0, "stone": -0.5}
+    default_tr = ta + mrt_offsets.get(material, 1.0)
+    tr = float(data.get("mean_radiant_temp_c", default_tr))
+
+    # Operative temperature = (air_temp + mean_radiant_temp) / 2 — simplified ASHRAE
+    t_op = (ta + tr) / 2
+
+    # ── Fanger PMV (ISO 7730 simplified, no iterative tcl convergence) ────────
+    M  = met * 58.15    # metabolic rate W/m²
+    W  = 0.0            # external mechanical work (seated/office: ≈ 0)
+    icl = 0.155 * clo   # clothing thermal resistance (m²·K/W)
+
+    # Clothing surface area factor (Fanger 1970)
+    fcl = 1.05 + 0.645 * icl if icl <= 0.078 else 1.05 + 0.645 * icl
+
+    # Water vapour partial pressure (kPa) — Antoine equation
+    pa = (rh / 100.0) * math.exp(16.6536 - 4030.183 / (ta + 235.0))
+
+    # Clothing surface temperature (single-pass linear estimate)
+    tcl = ta + (35.5 - ta) / (3.5 * icl + 0.1)
+
+    # Convective heat transfer coefficient (max of forced and natural)
+    hcf = 12.1 * math.sqrt(va)           # forced convection
+    hcn = 2.38 * abs(tcl - ta) ** 0.25   # natural convection
+    hc  = max(hcf, hcn)
+
+    # Fanger PMV formula
+    pmv_raw = (0.303 * math.exp(-0.036 * M) + 0.028) * (
+        (M - W)
+        - 3.05e-3 * (5733 - 6.99 * (M - W) - pa * 1000)
+        - 0.42  * ((M - W) - 58.15)
+        - 1.7e-5 * M * (5867 - pa * 1000)
+        - 0.0014 * M * (34 - ta)
+        - 3.96e-8 * fcl * ((tcl + 273) ** 4 - (tr + 273) ** 4)
+        - fcl * hc * (tcl - ta)
+    )
+    pmv = round(max(-3.0, min(3.0, pmv_raw)), 2)
+
+    # PPD from PMV (ISO 7730 Eq. 5)
+    ppd = round(100 - 95 * math.exp(-0.03353 * pmv ** 4 - 0.2179 * pmv ** 2), 1)
+    ppd = max(5.0, min(100.0, ppd))
+
+    # Thermal sensation scale
+    sensation_map = [
+        (-3.0, -2.5, "Cold"),
+        (-2.5, -1.5, "Cool"),
+        (-1.5, -0.5, "Slightly cool"),
+        (-0.5,  0.5, "Neutral (comfortable)"),
+        ( 0.5,  1.5, "Slightly warm"),
+        ( 1.5,  2.5, "Warm"),
+        ( 2.5,  4.0, "Hot"),
+    ]
+    sensation = "Neutral (comfortable)"
+    for lo, hi, label in sensation_map:
+        if lo <= pmv < hi:
+            sensation = label
+            break
+
+    ashrae_compliant = -0.5 <= pmv <= 0.5
+
+    # Recommendations
+    recs: list[str] = []
+    if pmv > 1.0:
+        recs.append(f"Cooling needed: lower air temperature to ~{ta - abs(pmv) * 1.5:.1f}°C or increase air velocity to 0.3–0.5 m/s.")
+        if material == "glass":
+            recs.append("Add external shading or high-performance low-e glazing to reduce solar radiant heat gain (main driver of elevated MRT).")
+    elif pmv > 0.5:
+        recs.append("Slightly warm: consider raising air velocity to 0.15–0.25 m/s via ceiling fans — perceived temperature drops ~1°C per 0.1 m/s increase.")
+    elif pmv < -1.0:
+        recs.append(f"Heating needed: raise air temperature to ~{ta + abs(pmv) * 1.5:.1f}°C or add local radiant panels.")
+        if va > 0.2:
+            recs.append("Draught is amplifying cold sensation — reduce supply air velocity or reposition diffusers away from occupied zones.")
+    elif pmv < -0.5:
+        recs.append("Slightly cool: increase heating setpoint by 1–2°C or supply warmer air.")
+    if ppd > 20:
+        recs.append(f"PPD {ppd}% exceeds WELL v2 Feature 54 target (< 20% dissatisfied). Prioritise both temperature and air velocity adjustments.")
+    if not recs:
+        recs.append("Thermal environment is within ASHRAE 55-2020 / ISO 7730 comfort zone. Maintain current HVAC setpoints.")
+
+    return jsonify({
+        "pmv":                   pmv,
+        "ppd":                   ppd,
+        "sensation":             sensation,
+        "ashrae55_compliant":    ashrae_compliant,
+        "operative_temperature_c": round(t_op, 1),
+        "inputs": {
+            "air_temp_c":              ta,
+            "mean_radiant_temp_c":     round(tr, 1),
+            "air_velocity_ms":         va,
+            "relative_humidity_pct":   rh,
+            "metabolic_rate_met":      met,
+            "clothing_insulation_clo": clo,
+            "facade_material":         material,
+        },
+        "recommendations": recs,
+        "standards": {
+            "pmv_reference":  "ISO 7730:2005 / ASHRAE 55-2020 — PMV ±0.5 = compliant comfort zone",
+            "ppd_target":     "WELL v2 Feature 54 — PPD < 20% in ≥ 90% of occupied spaces",
+            "well_note":      "WELL v2 also requires adaptive comfort analysis (ASHRAE 55 Section 5.4) for naturally ventilated spaces",
+        },
+        "note": (
+            "Fanger steady-state PMV model (ISO 7730:2005). "
+            "For mixed-mode, naturally ventilated, or transient scenarios use the "
+            "ASHRAE 55-2020 adaptive model or dynamic thermal simulation (EnergyPlus/IDA ICE)."
+        ),
+    })
+
+
 if __name__ == "__main__":
     port = 5000
 
