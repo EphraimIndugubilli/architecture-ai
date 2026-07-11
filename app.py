@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+import time
 
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 from flask_cors import CORS
@@ -122,6 +123,22 @@ def image_to_base64(file_bytes: bytes, filename: str) -> tuple[str, str]:
     buf = io.BytesIO()
     img.save(buf, format="JPEG" if "jpeg" in mime else "PNG")
     return base64.b64encode(buf.getvalue()).decode("utf-8"), mime
+
+
+def _groq_call(client, model: str, messages: list, max_tokens: int, max_retries: int = 3):
+    """Groq API call with exponential-backoff retry on transient errors (rate limits, timeouts)."""
+    for attempt in range(max_retries):
+        try:
+            return client.chat.completions.create(
+                model=model, messages=messages, max_tokens=max_tokens,
+            )
+        except Exception as e:
+            err = str(e).lower()
+            is_transient = any(k in err for k in ("rate", "timeout", "connection", "429", "502", "503", "500"))
+            if attempt < max_retries - 1 and is_transient:
+                time.sleep(2 ** attempt)
+                continue
+            raise
 
 
 def try_parse_json(raw: str) -> dict:
@@ -268,17 +285,14 @@ def analyze():
     chosen_model = resolve_model(request.form.get("model"))
     try:
         client = Groq(api_key=API_KEY)
-        response = client.chat.completions.create(
-            model=chosen_model,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_data_url}},
-                    {"type": "text", "text": PROMPT},
-                ],
-            }],
-            max_tokens=4096,
-        )
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+                {"type": "text", "text": PROMPT},
+            ],
+        }]
+        response = _groq_call(client, chosen_model, messages, 4096)
         raw_text = response.choices[0].message.content
         spec, report = parse_response(raw_text)
         return jsonify({"spec": spec, "report": report, "image": image_data_url, "model_used": chosen_model})
