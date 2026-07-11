@@ -1899,6 +1899,167 @@ def thermal_comfort():
     })
 
 
+BIOPHILIC_PROMPT = """
+You are an expert in biophilic design — the practice of connecting building occupants
+with nature to improve wellbeing, productivity, and stress recovery.
+
+Analyze the architectural image provided and score each biophilic element from 0–10.
+Output a JSON block (between ```json and ```) with these exact fields:
+
+```json
+{
+  "overall_biophilic_score": 0-100,
+  "wellbeing_uplift_estimate_pct": 0-15,
+  "green_elements": {
+    "score": 0-10,
+    "observed": ["list what you actually see, e.g. green wall, planter boxes, roof garden"]
+  },
+  "natural_light": {
+    "score": 0-10,
+    "observed": ["e.g. floor-to-ceiling glazing, skylights, light wells"]
+  },
+  "natural_materials": {
+    "score": 0-10,
+    "observed": ["e.g. exposed timber, stone cladding, bamboo panels"]
+  },
+  "organic_forms": {
+    "score": 0-10,
+    "observed": ["e.g. curved facade, flowing canopy, irregular massing"]
+  },
+  "water_features": {
+    "score": 0-10,
+    "observed": ["e.g. reflection pool, waterfall feature, rain garden — or none visible"]
+  },
+  "views_of_nature": {
+    "score": 0-10,
+    "observed": ["e.g. street trees, park frontage, panoramic sky — or none visible"]
+  },
+  "certification_alignment": ["WELL v2 Feature 63", "LEED v4 Biophilic Design credit", "Living Building Challenge"],
+  "top_improvements": ["3 specific, actionable interventions ranked by impact"]
+}
+```
+
+After the JSON block, write a 3-paragraph Biophilic Design Assessment explaining:
+1. What biophilic elements are present and how well they are integrated
+2. The evidence-based wellbeing and productivity impact for occupants
+3. The highest-priority interventions to reach a score of 70+ (WELL Biophilic credit threshold)
+
+Be specific to the image — do not invent features that are not visible.
+"""
+
+
+@app.route("/biophilic-score", methods=["POST"])
+def biophilic_score():
+    """Score a building image for biophilic design quality using LLaMA vision.
+
+    Biophilic design — incorporating direct contact with nature (green walls,
+    daylight, water, natural materials) and indirect analogues (organic forms,
+    natural patterns) — is a major 2026 architectural wellness trend.
+    WELL v2 Feature 63 and LEED v5 pilot credits now reward it explicitly,
+    and meta-analyses show occupant wellbeing improvements of 8–15 % and
+    productivity gains of 6–10 % in high-scoring biophilic buildings.
+
+    Scores six dimensions (green elements, natural light, natural materials,
+    organic forms, water features, views of nature) on 0–10 and aggregates
+    them into a 0–100 overall score with WELL/LEED alignment notes and
+    ranked improvement actions.
+
+    Request: multipart/form-data with field 'image' (JPEG/PNG/WEBP).
+    Optional query param 'model' to override the default vision model.
+    """
+    if "image" not in request.files:
+        return jsonify({"error": "No image uploaded — send multipart/form-data with field 'image'"}), 400
+
+    file = request.files["image"]
+    if not file.filename:
+        return jsonify({"error": "Empty filename"}), 400
+
+    try:
+        file_bytes = file.read()
+        b64, mime = image_to_base64(file_bytes, file.filename)
+        image_data_url = f"data:{mime};base64,{b64}"
+    except Exception as e:
+        return jsonify({"error": f"Image processing failed: {str(e)}"}), 400
+
+    if not API_KEY:
+        return jsonify({"error": "No API key configured"}), 500
+
+    requested_model = request.args.get("model") or request.form.get("model")
+    model_id = resolve_model(requested_model)
+
+    try:
+        client = Groq(api_key=API_KEY)
+        response = client.chat.completions.create(
+            model=model_id,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_data_url}},
+                    {"type": "text", "text": BIOPHILIC_PROMPT},
+                ],
+            }],
+            max_tokens=2048,
+        )
+        raw_text = response.choices[0].message.content
+
+        metrics: dict = {}
+        json_match = re.search(r"```json\s*(.*?)```", raw_text, re.DOTALL)
+        if json_match:
+            metrics = try_parse_json(json_match.group(1))
+
+        assessment = raw_text
+        report_match = re.search(r"```.*?```\s*(.*)", raw_text, re.DOTALL)
+        if report_match:
+            assessment = report_match.group(1).strip()
+
+        score = metrics.get("overall_biophilic_score")
+        try:
+            score = max(0, min(100, int(score or 0)))
+        except (TypeError, ValueError):
+            score = 0
+        metrics["overall_biophilic_score"] = score
+
+        uplift = metrics.get("wellbeing_uplift_estimate_pct")
+        try:
+            uplift = round(max(0.0, min(15.0, float(uplift or 0))), 1)
+        except (TypeError, ValueError):
+            uplift = 0.0
+        metrics["wellbeing_uplift_estimate_pct"] = uplift
+
+        for dim in ["green_elements", "natural_light", "natural_materials",
+                    "organic_forms", "water_features", "views_of_nature"]:
+            if dim not in metrics or not isinstance(metrics[dim], dict):
+                metrics[dim] = {"score": 0, "observed": []}
+            else:
+                try:
+                    metrics[dim]["score"] = max(0, min(10, int(metrics[dim].get("score", 0) or 0)))
+                except (TypeError, ValueError):
+                    metrics[dim]["score"] = 0
+                if not isinstance(metrics[dim].get("observed"), list):
+                    metrics[dim]["observed"] = []
+
+        for list_field in ["certification_alignment", "top_improvements"]:
+            val = metrics.get(list_field, [])
+            metrics[list_field] = val if isinstance(val, list) else []
+
+        grade = (
+            "Platinum" if score >= 85
+            else "Gold" if score >= 70
+            else "Silver" if score >= 55
+            else "Bronze" if score >= 40
+            else "Below Standard"
+        )
+
+        return jsonify({
+            "metrics": metrics,
+            "grade": grade,
+            "assessment": assessment,
+            "model_used": model_id,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = 5000
 
