@@ -2099,6 +2099,218 @@ def biophilic_score():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/carbon-footprint", methods=["POST"])
+def carbon_footprint():
+    """Embodied & operational carbon estimator for buildings.
+
+    2026 regulatory trend: the EU EPBD recast and India's National Action Plan
+    on Climate Change both mandate whole-life carbon assessments for new buildings.
+    This endpoint uses published RICS 2023 / IStructE Structural Carbon Tool
+    intensity factors to produce a rapid pre-design carbon estimate without
+    requiring a full LCA model.
+
+    Embodied carbon (A1–A5) is calculated per structural system, envelope, and
+    fit-out. Operational carbon is estimated from climate zone and building type.
+    Results are benchmarked against the RIBA 2030 Climate Challenge target
+    (≤ 350 kg CO₂e/m² whole-life for mixed-use; ≤ 600 for residential) and the
+    ambitious net-zero target (≤ 250 kg CO₂e/m²).
+
+    Request JSON:
+      floor_area_m2     (float, required)  — total gross internal floor area
+      stories           (int, default 4)   — number of storeys
+      construction_type (str) — "concrete" | "steel" | "timber" | "clt" | "masonry"
+      glazing_ratio     (float, 0–1)       — facade glass fraction (default 0.3)
+      insulation_type   (str) — "mineral_wool" | "eps" | "xps" | "spray_foam" | "hemp"
+      location_climate  (str) — "tropical" | "subtropical" | "temperate" | "continental" | "subarctic"
+      building_type     (str) — "residential" | "office" | "retail" | "education" | "industrial"
+      occupancy_years   (int, default 60)  — assumed building lifetime
+
+    Response:
+      embodied_kg_co2e           total embodied carbon (A1-A5)
+      operational_kg_co2e        total operational carbon (B6) over lifetime
+      whole_life_kg_co2e         embodied + operational total
+      intensity_kg_co2e_per_m2   whole-life per m²
+      net_zero_gap_pct           % above/below the 250 kg/m² net-zero target
+      riba_2030_target           the applicable RIBA 2030 target for this type
+      grade                      "net_zero" | "low_carbon" | "compliant" | "above_target"
+      breakdown                  dict of carbon by system (kg CO₂e)
+      recommendations            list of carbon-reduction strategies
+    """
+    data = request.get_json(silent=True) or {}
+
+    # ── Input parsing & validation ────────────────────────────────────────────
+    try:
+        floor_area = float(data.get("floor_area_m2", 0))
+        if floor_area <= 0:
+            return jsonify({"error": "floor_area_m2 must be a positive number"}), 400
+    except (TypeError, ValueError):
+        return jsonify({"error": "floor_area_m2 must be a positive number"}), 400
+
+    stories = max(1, min(200, int(data.get("stories", 4))))
+    glazing_ratio = max(0.0, min(1.0, float(data.get("glazing_ratio", 0.3))))
+    occupancy_years = max(10, min(200, int(data.get("occupancy_years", 60))))
+
+    construction_type = str(data.get("construction_type", "concrete")).lower()
+    insulation_type   = str(data.get("insulation_type", "mineral_wool")).lower()
+    location_climate  = str(data.get("location_climate", "temperate")).lower()
+    building_type     = str(data.get("building_type", "office")).lower()
+
+    # ── Embodied carbon intensity factors (kg CO₂e / m² GIA) ─────────────────
+    # Sources: RICS Whole Life Carbon Assessment 2023, IStructE Structural
+    # Carbon Tool 2022, LETI Carbon Primer 2020.
+    # These are representative mid-range values for pre-design estimation.
+    STRUCTURE_FACTORS = {
+        "concrete":  280,   # reinforced concrete frame (high — cement is 8% of global CO₂)
+        "steel":     220,   # structural steel frame (recycled content reduces this)
+        "timber":    80,    # engineered timber (glulam / LVL) — sequesters biogenic carbon
+        "clt":       60,    # cross-laminated timber — best embodied carbon of any structure
+        "masonry":   190,   # brick/block (cavity wall load-bearing)
+    }
+    INSULATION_FACTORS = {
+        "mineral_wool": 3.0,    # kg CO₂e/m² per cm thickness (per 10 cm: 30)
+        "eps":          6.5,
+        "xps":          10.5,   # highest (uses HFCs in blowing agent)
+        "spray_foam":   8.0,
+        "hemp":         1.0,    # biogenic — nearly carbon neutral
+    }
+    # Typical insulation thickness by climate zone (cm)
+    INSULATION_THICKNESS = {
+        "tropical": 5, "subtropical": 8, "temperate": 15,
+        "continental": 20, "subarctic": 30,
+    }
+    # Glazing embodied carbon (kg CO₂e/m² of glass)
+    GLAZING_FACTOR = 150   # double-glazed argon-filled unit (triple = 190)
+
+    # Fit-out: MEP, finishes, partitions (kg CO₂e/m² GIA) by building type
+    FITOUT_FACTORS = {
+        "residential": 120, "office": 200, "retail": 150,
+        "education": 160,   "industrial": 60,
+    }
+
+    # ── Operational carbon: kgCO₂e/m²/yr baseline by climate × building type ─
+    # Approximated from IEA 2023 buildings data and ASHRAE 90.1 benchmarks.
+    OPERATIONAL_INTENSITY = {
+        ("tropical",     "residential"): 18, ("tropical",     "office"): 55,
+        ("tropical",     "retail"):      70, ("tropical",     "education"): 40,
+        ("tropical",     "industrial"):  30,
+        ("subtropical",  "residential"): 22, ("subtropical",  "office"): 60,
+        ("subtropical",  "retail"):      75, ("subtropical",  "education"): 45,
+        ("subtropical",  "industrial"):  35,
+        ("temperate",    "residential"): 28, ("temperate",    "office"): 65,
+        ("temperate",    "retail"):      80, ("temperate",    "education"): 50,
+        ("temperate",    "industrial"):  40,
+        ("continental",  "residential"): 38, ("continental",  "office"): 80,
+        ("continental",  "retail"):      95, ("continental",  "education"): 60,
+        ("continental",  "industrial"):  50,
+        ("subarctic",    "residential"): 55, ("subarctic",    "office"): 100,
+        ("subarctic",    "retail"):      115, ("subarctic",    "education"): 75,
+        ("subarctic",    "industrial"):  65,
+    }
+
+    # RIBA 2030 Climate Challenge whole-life targets (kg CO₂e/m²)
+    RIBA_TARGETS = {
+        "residential": 600, "office": 350, "retail": 400,
+        "education": 350,   "industrial": 250,
+    }
+    NET_ZERO_TARGET = 250  # ambitious whole-life target (kg CO₂e/m²)
+
+    # ── Calculations ──────────────────────────────────────────────────────────
+    structure_factor = STRUCTURE_FACTORS.get(construction_type, 280)
+    insulation_factor = INSULATION_FACTORS.get(insulation_type, 3.0)
+    insulation_thickness_cm = INSULATION_THICKNESS.get(location_climate, 15)
+    insulation_carbon_per_m2 = insulation_factor * insulation_thickness_cm
+
+    # Facade area approximation: perimeter × height, then × (opaque + glazed portions)
+    # Simple model: facade_ratio (ratio of facade area to GIA) by story count
+    facade_ratio = max(0.3, 1.2 / max(1, stories ** 0.5))
+    facade_area_m2 = floor_area * facade_ratio
+    glazing_area   = facade_area_m2 * glazing_ratio
+    opaque_area    = facade_area_m2 * (1 - glazing_ratio)
+
+    embodied_structure   = round(floor_area * structure_factor)
+    embodied_envelope    = round(opaque_area * insulation_carbon_per_m2 + glazing_area * GLAZING_FACTOR)
+    embodied_fitout      = round(floor_area * FITOUT_FACTORS.get(building_type, 150))
+    embodied_total       = embodied_structure + embodied_envelope + embodied_fitout
+
+    op_key = (location_climate, building_type)
+    op_intensity = OPERATIONAL_INTENSITY.get(op_key, 50)
+    operational_total = round(floor_area * op_intensity * occupancy_years)
+
+    whole_life_total        = embodied_total + operational_total
+    intensity_per_m2        = round(whole_life_total / floor_area, 1)
+    riba_target             = RIBA_TARGETS.get(building_type, 400)
+    net_zero_gap_pct        = round((intensity_per_m2 - NET_ZERO_TARGET) / NET_ZERO_TARGET * 100, 1)
+
+    if intensity_per_m2 <= NET_ZERO_TARGET:
+        grade = "net_zero"
+    elif intensity_per_m2 <= riba_target * 0.5:
+        grade = "low_carbon"
+    elif intensity_per_m2 <= riba_target:
+        grade = "compliant"
+    else:
+        grade = "above_target"
+
+    # ── Recommendations ───────────────────────────────────────────────────────
+    recommendations = []
+    if construction_type == "concrete":
+        recommendations.append(
+            "Switch to CLT or timber frame to cut structural embodied carbon by up to 75% "
+            f"(saves ~{round(floor_area * (structure_factor - STRUCTURE_FACTORS['clt']) / 1000)} t CO₂e)."
+        )
+    elif construction_type == "steel":
+        recommendations.append(
+            "Specify 90%+ recycled-content steel (Electric Arc Furnace) to reduce "
+            "structural carbon by 30–40%."
+        )
+    if insulation_type in ("xps", "spray_foam"):
+        recommendations.append(
+            "Replace XPS/spray-foam insulation with mineral wool or hemp to avoid "
+            "HFC blowing-agent emissions — up to 3× lower GWP per unit thickness."
+        )
+    if glazing_ratio > 0.5:
+        recommendations.append(
+            f"Reduce glazing ratio from {int(glazing_ratio*100)}% to ≤40% — excess glazing "
+            "adds embodied carbon and increases cooling/heating loads simultaneously."
+        )
+    if op_intensity > 60:
+        recommendations.append(
+            "Install an all-electric HVAC system powered by renewables (heat pumps + PV) "
+            f"to cut operational carbon toward 0 kg CO₂e/m²/yr from the current {op_intensity} baseline."
+        )
+    if stories <= 3:
+        recommendations.append(
+            "Consider adding storeys: a denser building amortises foundation and facade "
+            "embodied carbon across more usable floor area, reducing intensity per m²."
+        )
+    if not recommendations:
+        recommendations.append(
+            "Strong carbon performance already. Pursue biogenic materials (timber, hemp) and "
+            "PV generation to push toward carbon-negative over the building lifetime."
+        )
+
+    return jsonify({
+        "floor_area_m2": floor_area,
+        "construction_type": construction_type,
+        "building_type": building_type,
+        "location_climate": location_climate,
+        "occupancy_years": occupancy_years,
+        "embodied_kg_co2e": embodied_total,
+        "operational_kg_co2e": operational_total,
+        "whole_life_kg_co2e": whole_life_total,
+        "intensity_kg_co2e_per_m2": intensity_per_m2,
+        "net_zero_gap_pct": net_zero_gap_pct,
+        "riba_2030_target": riba_target,
+        "grade": grade,
+        "breakdown": {
+            "structure_kg_co2e": embodied_structure,
+            "envelope_kg_co2e":  embodied_envelope,
+            "fitout_kg_co2e":    embodied_fitout,
+            "operational_kg_co2e": operational_total,
+        },
+        "recommendations": recommendations,
+    })
+
+
 if __name__ == "__main__":
     port = 5000
 
