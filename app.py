@@ -6,12 +6,14 @@ Open: http://localhost:5000
 """
 
 import base64
+import hashlib
 import io
 import json
 import os
 import re
 import sys
 import time
+from collections import OrderedDict
 
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 from flask_cors import CORS
@@ -48,6 +50,36 @@ def resolve_model(requested: str | None) -> str:
     if requested and requested in AVAILABLE_MODELS:
         return requested
     return MODEL
+
+
+# ── Analysis cache ────────────────────────────────────────────────────────────
+# LRU cache keyed on (image_sha256, model_id).  Each Groq vision call costs
+# ~0.3 s and ~200 tokens; re-analysing the same image with the same model is
+# pure waste.  The cache is in-process (evicted on restart) so it never serves
+# stale results across deployments.  Max 64 entries (~50 MB if every image
+# is the 1568-px JPEG ceiling) prevents unbounded memory growth.
+_ANALYZE_CACHE: OrderedDict = OrderedDict()
+_ANALYZE_CACHE_MAX = 64
+
+
+def _cache_key(file_bytes: bytes, model: str) -> str:
+    digest = hashlib.sha256(file_bytes).hexdigest()
+    return f"{digest}:{model}"
+
+
+def _cache_get(key: str):
+    if key in _ANALYZE_CACHE:
+        _ANALYZE_CACHE.move_to_end(key)  # mark as recently used
+        return _ANALYZE_CACHE[key]
+    return None
+
+
+def _cache_set(key: str, value: dict) -> None:
+    _ANALYZE_CACHE[key] = value
+    _ANALYZE_CACHE.move_to_end(key)
+    if len(_ANALYZE_CACHE) > _ANALYZE_CACHE_MAX:
+        _ANALYZE_CACHE.popitem(last=False)  # evict least-recently-used
+
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
@@ -283,6 +315,11 @@ def analyze():
         return jsonify({"error": "No API key configured in arch_config.py"}), 500
 
     chosen_model = resolve_model(request.form.get("model"))
+    cache_key = _cache_key(file_bytes, chosen_model)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return jsonify({**cached, "image": image_data_url, "from_cache": True})
+
     try:
         client = Groq(api_key=API_KEY)
         messages = [{
@@ -295,7 +332,9 @@ def analyze():
         response = _groq_call(client, chosen_model, messages, 4096)
         raw_text = response.choices[0].message.content
         spec, report = parse_response(raw_text)
-        return jsonify({"spec": spec, "report": report, "image": image_data_url, "model_used": chosen_model})
+        result = {"spec": spec, "report": report, "model_used": chosen_model}
+        _cache_set(cache_key, result)
+        return jsonify({**result, "image": image_data_url})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
